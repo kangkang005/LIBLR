@@ -32,6 +32,8 @@ import pprint
 
 from enum import Enum, IntEnum
 
+from typing import Generator
+
 
 #----------------------------------------------------------------------
 # exports
@@ -71,20 +73,20 @@ class Symbol (object):
     def __init__ (self, name, terminal = False):
         self.name = name
         self.term = terminal
-    
+
     # 转为可打印字符串
     def __str__ (self):
         if not self.name:
             return "''"
         return self.name
 
-    # 判断是否相等
+    # 根据不同的类型判断是否相等
     def __eq__ (self, symbol):
         if isinstance(symbol, str):
             return (self.name == symbol)
         elif symbol is None:
             return (self is None)
-        elif not isinstance(symbol, Symbol):
+        elif not isinstance(symbol, type(self)):
             raise TypeError('Symbol cannot be compared to a %s'%type(symbol))
         return (self.name == symbol.name)
 
@@ -134,13 +136,14 @@ class Symbol (object):
             obj.token = copy.deepcopy(self.token)
         return obj
 
-    # 判断是否是字符串字面量
+    # 判断是否是字符串字面量, 被引号包围的字符串为字面量
     def _is_literal (self):
         if len(self.name) < 2:
             return False
         mark = self.name[0]
         if mark not in ('"', "'"):
             return False
+        # "string" or 'string'
         if self.name[-1] == mark:
             return True
         return False
@@ -166,12 +169,16 @@ class Symbol (object):
 # 从字符串或者 tuple 创建一个 Symbol
 #----------------------------------------------------------------------
 def load_symbol (source):
+    # load_symbol(Symbol("$", True))
     if isinstance(source, Symbol):
         return source
+    # load_symbol("$")
     elif isinstance(source, str):
         sym = Symbol(source)
+        # 字符串字面量视为终结符
         if sym.is_literal:
             sym.term = True
+            # 只有引号("" or '')，视为非终结符
             if len(sym.name) == 2 and sym.name[0] == sym.name[1]:
                 sym.term = False
                 sym.name = ''
@@ -182,6 +189,8 @@ def load_symbol (source):
         elif source == '#':
             sym.term = True
         return sym
+    # load_symbol(("$"))
+    # load_symbol(("$", True))
     elif isinstance(source, list) or isinstance(source, tuple):
         assert len(source) > 0
         if len(source) == 0:
@@ -202,6 +211,7 @@ def load_symbol (source):
 class Vector (object):
 
     def __init__ (self, vector):
+        # 产生式的右边
         self.m = tuple(self.__load_vector(vector))
         self.__hash = None
 
@@ -209,6 +219,7 @@ class Vector (object):
         epsilon = True
         output = []
         p = [ load_symbol(n) for n in vector ]
+        # 从符号列表中删除最左边的 epsilon
         for symbol in p:
             if not symbol.is_epsilon:
                 epsilon = False
@@ -310,7 +321,8 @@ class Vector (object):
 
 #----------------------------------------------------------------------
 # 产生式/生成式：由 head -> body 组成，head 是 symbol，
-# budy 是一个 Vector，即 symbol 组成的序列
+# body 是一个 Vector，即 symbol 组成的序列
+# index 是产生式的序列号
 #----------------------------------------------------------------------
 class Production (object):
 
@@ -321,8 +333,10 @@ class Production (object):
         self.index = index
         self.is_epsilon = None
         self.has_epsilon = None
+        # 优先级
         self.precedence = None
-        self.action = None
+        # 语义动作
+        self.action: dict[int, tuple[str, int]] = None  # {token pos: (token value, token pos)}
 
     def __len__ (self):
         return len(self.body)
@@ -335,6 +349,8 @@ class Production (object):
 
     def __hash__ (self):
         if self.__hash is None:
+            # self.head 和 self.body 是对象，先将对象转化成哈希值，再放入到 tuple 容器
+            # self.head 和 self.body 指向的对象必须含有 __hash__ 方法
             h1 = hash(self.head)
             h2 = hash(self.body)
             self.__hash = hash((h1, h2))
@@ -350,6 +366,7 @@ class Production (object):
         body = [ str(n) for n in self.body ]
         return '%s: %s ;'%(self.head, ' '.join(body))
 
+    # 利用对象的哈希值进行比较
     def __eq__ (self, p):
         assert isinstance(p, Production)
         if hash(self) != hash(p):
@@ -418,14 +435,14 @@ class Production (object):
     def leftmost_terminal (self):
         return self.body.leftmost_terminal()
 
-    # 计算是否直接左递归
+    # 计算是否直接左递归, 判断 head 是否等于产生式右边的第一个符号
     @property
     def is_left_recursion (self):
         if len(self.body) == 0:
             return False
         return (self.head == self.body[0])
 
-    # 计算是否直接右递归
+    # 计算是否直接右递归, 判断 head 是否等于产生式右边的最后一个符号
     @property
     def is_right_recursion (self):
         if len(self.body) == 0:
@@ -443,13 +460,14 @@ class Production (object):
         return '%s/%d'%(name, stack)
 
     # 返回包含动作的身体部分
+    # prec 优先级
     def stringify (self, head = True, body = True, action = False, prec = False):
         text = ''
         if head:
             text += str(self.head) + ': '
         act = getattr(self, 'action', {})
         if body:
-            for i, n in enumerate(self.body.m):
+            for i, n in enumerate(self.body):
                 if action and act and (i in act):
                     for m in act[i]:
                         text += '%s '%self.__action_to_string(m)
@@ -469,17 +487,50 @@ class Production (object):
 #----------------------------------------------------------------------
 class Grammar (object):
 
+    """example
+    E: E '+' T | T
+    E: E '-' T
+    @ignore [ \r\n\t]*
+    @match NUMBER [+-]?\d+(\.\d*)?
+
+    self.production = [
+        Production(Symbol('E'), Vector((Symbol('E'), Symbol("'+'", True), Symbol('T')))),
+        Production(Symbol('E'), Vector((Symbol('E'), Symbol("'-'", True), Symbol('T')))),
+        Production(Symbol('E'), Vector((Symbol('T'),)))
+    ]
+    self.symbol = {
+        "E"  : Symbol("E"),
+        "'+'": Symbol("'+'", True),
+        "T"  : Symbol("T"),
+        "'-'": Symbol("'-'", True),
+    }
+    self.terminal = {
+        "'+'": Symbol("'+'", True),
+        "'-'": Symbol("'-'", True)
+    }
+    self.rule = {
+        'E': [
+            Production(Symbol('E'), Vector((Symbol('E'), Symbol("'+'", True), Symbol('T')))),
+            Production(Symbol('E'), Vector((Symbol('E'), Symbol("'-'", True), Symbol('T')))),
+            Production(Symbol('E'), Vector((Symbol('T'),)))
+        ]
+    }
+    self.scanner = {
+        ('ignore', '[ \\r\\n\\t]*'),
+        ('match', 'NUMBER', '[+-]?\\d+(\\.\\d*)?'),
+    }
+    """
     def __init__ (self):
         self.production = []
-        self.symbol = {}            # str -> Symbol map
-        self.terminal = {}          # str -> Symbol map
-        self.rule = {}              # str -> list
+        self.symbol = {}            # symbol name str -> Symbol map
+        self.terminal = {}          # symbol name str -> Symbol map
+        self.rule = {}              # head name(left production) str -> Production list
         self.precedence = {}        # str -> prec
         self.assoc = {}             # str -> one of (None, 'left', 'right')
         self._anchor = {}           # str -> (filename, linenum)
-        self._dirty = False
+        self._dirty = False         # be modified if True
         self.scanner = []           # scanner rules
-        self.start = None
+        self.start = None           # Symbol | None
 
     def reset (self):
         self.production.clear()
@@ -513,6 +564,7 @@ class Grammar (object):
             return (key >= 0 and key < len(self.production))
         elif isinstance(key, Production):
             for p in self.production:
+                # 利用对象的哈希值进行比较
                 if p == key:
                     return True
         elif isinstance(key, Symbol):
@@ -553,7 +605,7 @@ class Grammar (object):
 
     def insert (self, index, production):
         self.production.insert(index, production)
-        self._dirty = True
+        self._dirty = True      # be modified
 
     def search (self, p, stop = -1):
         if stop < 0:
@@ -581,6 +633,7 @@ class Grammar (object):
     def replace (self, index, source):
         if isinstance(source, Production):
             self.production[index] = source
+        # 将其中一个产生式替换成多个产生式
         elif isinstance(source, list) or isinstance(source, tuple):
             for n in source:
                 assert isinstance(n, Production)
@@ -592,16 +645,16 @@ class Grammar (object):
         self.symbol.clear()
         self.rule.clear()
         for i, p in enumerate(self.production):
+            # p: production
             p.index = i
             head = p.head
             if head.name not in self.symbol:
                 self.symbol[head.name] = head
             for n in p.body:
+                # n: symbol
                 if n.name not in self.symbol:
                     self.symbol[n.name] = n
-            if head.name not in self.rule:
-                self.rule[head.name] = []
-            self.rule[head.name].append(p)
+            self.rule.setdefault(head.name, []).append(p)
         for n in self.terminal:
             s = self.terminal[n]
             if not s.term:
@@ -655,12 +708,13 @@ class Grammar (object):
                 cc.term = True
         return cc
 
-    # argument
-    def argument (self):
+    # 新增产生式 S' -> S, 构成增广文法(augmented grammar)
+    # augment
+    def augment (self):
         if not self.start:
             raise GrammarError('no start point')
         if 'S^' in self.symbol:
-            raise GrammarError('already argumented')
+            raise GrammarError('already augmented')
         head = 'S^'
         p = Production(head, [self.start])
         self.insert(0, p)
@@ -681,7 +735,8 @@ class Grammar (object):
             return '^PROD/' + str(obj)
         return str(obj)
 
-    # anchor: source file info (filename, line_num)
+    # use to print symbol message
+    # anchor: source file info -> (filename, line_num)
     def anchor_set (self, obj, filename, line_num):
         self._anchor[self.__anchor_key(obj)] = (filename, line_num)
         return 0
@@ -772,12 +827,15 @@ def _tokenize(code, specs, eof = None):
     for index in range(len(specs)):
         spec = specs[index]
         name, pattern = spec[:2]
+        # pn: pattern name
         pn = 'PATTERN%d'%index
-        definition[pn] = name
+        definition[pn] = name       # pattern name -> call | None | token name
         if len(spec) >= 3:
             extended[pn] = spec[2]
         patterns.append((pn, pattern))
     tok_regex = '|'.join('(?P<%s>%s)' % pair for pair in patterns)
+    # print(tok_regex)
+    # 每行的起始位置, 索引号代表行号
     line_starts = []
     pos = 0
     index = 0
@@ -789,6 +847,7 @@ def _tokenize(code, specs, eof = None):
         pos += 1
     line_num = 0
     for mo in re.finditer(tok_regex, code):
+        # group variable name: PATTERN0, PATTERN1 ...
         kind = mo.lastgroup
         value = mo.group()
         start = mo.start()
@@ -813,6 +872,8 @@ def _tokenize(code, specs, eof = None):
                     value = obj[1]
             else:
                 name = obj
+        # "line_num" starts at 0
+        # (<token name>, <token value>, <line number>, <column>)
         yield (name, value, line_num + 1, start - line_start + 1)
     if eof is not None:
         line_start = line_starts[-1]
@@ -999,12 +1060,16 @@ class internal (object):
 
     @staticmethod
     def echo_error(text, fn = None, line_num = 0, col = None):
+        # fn: file name
         name = (not fn) and '<buffer>' or fn
         if not fn:
+            # print text
             t = 'error: %s'%(text, )
         elif (not col) or (col < 0):
+            # print text line_num
             t = 'error:%s:%d: %s'%(name, line_num, text)
         else:
+            # print text line_num col
             t = 'error:%s:%d:%d: %s'%(name, line_num, col, text) 
         LOG_ERROR(t)
         return 0
@@ -1105,6 +1170,7 @@ class cstring (object):
             round = 2
         text = text.rstrip('uUlLbB')
         try:
+            # 进制转化
             x = int(text, round)
         except:
             x = 0
@@ -1115,6 +1181,7 @@ class cstring (object):
     @staticmethod
     def string_to_bool(text, defval = False):
         if text is None:
+            # defval 返回布尔的默认值
             return defval
         text = text.strip('\r\n\t ')
         if text == '':
@@ -1131,6 +1198,7 @@ class cstring (object):
     @staticmethod
     def string_to_float(text):
         text = text.strip('\r\n\t ').rstrip('f')
+        # 以小数点开头的，在小数点前面补零. 如：.12 -> 0.12
         if text.startswith('.'):
             text = '0' + text
         try:
@@ -1139,16 +1207,19 @@ class cstring (object):
             x = 0.0
         return x
 
+    # 去掉引号
     @staticmethod
     def string_unquote(text):
         text = text.strip("\r\n\t ")
         if len(text) < 2:
             return text.replace('"', '').replace("'", '')
+        # 去掉开头的引号
         mark = text[0]
         if mark not in ('"', "'"):
             return text.replace('"', '').replace("'", '')
         if text[-1] != mark:
             return text.replace('"', '').replace("'", '')
+        # 最左右存在引号
         pos = 1
         output = []
         size = len(text)
@@ -1390,6 +1461,10 @@ class GrammarLex (object):
 
     def _build_pattern (self):
         spec = [
+                    # (回调函数|None|Token Name，匹配规则)
+                    # (回调函数|None|Token Name，匹配规则, 输入回调额外参数)
+                    # None 表示忽略
+                    # 忽略注释, 无回调函数
                     (None, PATTERN_COMMENT1),       # ignore
                     (None, PATTERN_COMMENT2),       # ignore
                     (None, PATTERN_COMMENT3),       # ignore
@@ -1399,10 +1474,10 @@ class GrammarLex (object):
                     (self._handle_macro, PATTERN_GMACRO),
                     (self._handle_integer, PATTERN_CINTEGER),
                     (self._handle_float, PATTERN_NUMBER),
-                    ('BAR', r'\|'),
-                    ('END', r'[;]'),
-                    (':', r'[:]'),
-                    ('LEX', r'[@].*'),
+                    ('BAR', r'\|'),         # 产生式或符号
+                    ('END', r'[;]'),        # 产生式结尾
+                    (':', r'[:]'),          # 产生式分隔符
+                    ('LEX', r'[@].*'),      # 词法
                     ('NAME', PATTERN_GNAME),
                     ('NAME', PATTERN_NAME),
                     (self._handle_action, r'\{[^\{\}]*\}'),
@@ -1433,14 +1508,13 @@ class GrammarLex (object):
         return ('ACTION', value)
 
     def process (self, source):
-        tokens = {}
+        tokens = {}     # line no -> token list
         for token in tokenize(source, self.specific):
             # print(repr(token))
             line_num = token.line
-            if line_num not in tokens:
-                tokens[line_num] = []
-            tokens[line_num].append(token)
+            tokens.setdefault(line_num, []).append(token)
             # print(token)
+        # print(tokens)
         return tokens
 
 
@@ -1455,7 +1529,7 @@ class GrammarLoader (object):
         self.code = 0
         self.source = ''
         self.precedence = 0
-        self.srcinfo = {}
+        self.srcinfo = {}           # token value -> (file name, line no) ; record first appearance
         self.lex = GrammarLex()
 
     def error (self, *args):
@@ -1510,6 +1584,7 @@ class GrammarLoader (object):
         for line_num in keys:
             self.line_num = line_num
             args = tokens[line_num]
+            # 返回异常值
             hr = 0
             if not args:
                 continue
@@ -1524,6 +1599,7 @@ class GrammarLoader (object):
         if len(self._cache) > 0:
             self._process_rule(self._cache)
         self.g.update()
+        # 第一个产生式的左边作为文法的开头
         if self.g.start is None:
             if len(self.g.production) > 0:
                 self.g.start = self.g.production[0].head
@@ -1551,27 +1627,36 @@ class GrammarLoader (object):
     def _process_rule (self, args):
         if not args:
             return 0
+        # 拷贝 args
         argv = [n for n in args]
         if argv[0].name == 'STRING':
             self.error_token(argv[0], 'string literal %s can not have a rule'%argv[0].value)
             return 1
+        # 每个产生式开头必须是 'NAME' 类型，即非终结符
         elif argv[0].name != 'NAME':
             self.error_token(argv[0], 'wrong production head: "%s"'%argv[0].value)
             return 1
+        # 每个产生式结尾必须是 'END' 类型，即;
         elif argv[-1].name != 'END':
             self.error_token(argv[-1], 'missing ";"')
             return 2
         head = load_symbol(argv[0].value)
+        # 去掉产生式结尾符号;
         argv = argv[:-1]
+        # 产生式的长度(除了结尾符号)必须大于1
+        #   head : [body] ;
         if len(argv) < 2:
             self.error_token(argv[0], 'require ":" after "%s"'%(argv[0].value))
             return 3
+        # 产生式分隔符
         elif argv[1].name != ':':
             self.error_token(argv[1], 'require ":" before "%s"'%(argv[1].value))
             return 4
         cache = []
+        # 产生式右边
         for arg in argv[2:]:
             if arg.name == 'BAR':
+                # hr 返回异常值
                 hr = self._add_rule(head, cache)
                 cache.clear()
                 if hr != 0:
@@ -1594,6 +1679,8 @@ class GrammarLoader (object):
         precedence = None
         while pos < size:
             token = argv[pos]
+            # 将一个产生式右边的非终结符和终结符加入到 body, 生成 Production 对象
+            # Type STRING is terminal
             if token.name == 'STRING':
                 text = token.value
                 value = cstring.string_unquote(text)
@@ -1609,11 +1696,14 @@ class GrammarLoader (object):
                 symbol = load_symbol(token.value)
                 body.append(symbol)
                 pos += 1
+                # push terminal
                 self.g.push_token(symbol)
+            # Type NAME is non-terminal
             elif token.name == 'NAME':
                 symbol = load_symbol(token.value)
                 body.append(symbol)
                 pos += 1
+            # 以上的 token 加入到 body
             elif token.name == 'MACRO':
                 cmd = token.value.strip()
                 pos += 1
@@ -1630,10 +1720,8 @@ class GrammarLoader (object):
                     continue
             elif token.name == 'ACTION':
                 i = len(body)
-                if i not in action:
-                    action[i] = []
                 act = (token.value, i)
-                action[i].append(act)
+                action.setdefault(i, []).append(act)
                 pos += 1
             elif token.name == 'NUMBER':
                 self.error_token(token)
@@ -1666,6 +1754,7 @@ class GrammarLoader (object):
         macro = args[0]
         argv = args[1:]
         cmd = macro.value
+        # define terminal, append to self.terminal
         if cmd == '%token':
             for n in argv:
                 if n.name != 'NAME':
@@ -1798,7 +1887,7 @@ MARK_VISITED = 2
 
 EPSILON = Symbol('', False)
 EOF = Symbol('$', True)
-PSHARP = Symbol('#', True)
+PSHARP = Symbol('#', True)  # SPHARP(#) is not in grammar
 
 
 #----------------------------------------------------------------------
@@ -1806,13 +1895,18 @@ PSHARP = Symbol('#', True)
 #----------------------------------------------------------------------
 class SymbolInfo (object):
 
+    """example
+    F : '-';            F not has epsilon and not is epsilon; has_epsilon = False, is_epsilon = True
+    E : epsilon '+';    E has epsilon but not is epsilon; has_epsilon = True, is_epsilon = False
+    T : ;               T has epsilon and is epsilon; has_epsilon = True, is_epsilon = True
+    """
     def __init__ (self, symbol):
         self.symbol = symbol
         self.mark = MARK_UNVISITED
         self.rules = []
         self.rule_number = 0
         self.is_epsilon = None
-        self.has_epsilon = None
+        self.has_epsilon = None     # has epsilon but maybe not is epsilon
 
     def __copy__ (self):
         obj = SymbolInfo(self.symbol)
@@ -1853,8 +1947,8 @@ class GrammarAnalyzer (object):
 
     def __init__ (self, g: Grammar):
         assert g is not None
-        self.g = g
-        self.info = {}
+        self.g = g                  # Grammar
+        self.info = {}              # symbol name -> SymbolInfo
         self.epsilon = Symbol('')
         self.FIRST = {}
         self.FOLLOW = {}
@@ -1908,6 +2002,7 @@ class GrammarAnalyzer (object):
                 info = self.info[symbol]
                 for rule in info.rules:
                     first = self.__calculate_first_set(rule.body)
+                    # add terminal, which not in self.FIRST, in "first" to "self.FIRST"
                     for n in first:
                         if n not in self.FIRST[symbol]:
                             self.FIRST[symbol].add(n)
@@ -1923,13 +2018,16 @@ class GrammarAnalyzer (object):
             if symbol.term:
                 output.add(symbol.name)
                 break
+            # symbol is non-terminal
             if symbol.name not in self.FIRST:
                 for key in self.FIRST.keys():
                     print('FIRST:', key)
                 raise ValueError('FIRST set does not contain %r'%symbol.name)
+            # add terminal to first except epsilon
             for name in self.FIRST[symbol.name]:
                 if name != EPSILON:
                     output.add(name)
+            # if left body of production has epsilon, continue to find
             if EPSILON not in self.FIRST[symbol.name]:
                 break
             index += 1
@@ -1954,11 +2052,13 @@ class GrammarAnalyzer (object):
             changes = 0
             for p in self.g:
                 for i, symbol in enumerate(p.body):
+                    # skip leftmost terminal
                     if symbol.term:
                         continue
                     follow = p.body[i + 1:]
                     first = self.vector_first_set(follow)
                     epsilon = False
+                    # follow(head) add follow(symbol) if epsilon in first set which follows symbol
                     for n in first:
                         if n != EPSILON.name:
                             if n not in FOLLOW[symbol.name]:
@@ -2401,6 +2501,8 @@ class GrammarAnalyzer (object):
 
 #----------------------------------------------------------------------
 # RulePtr: Universal LR Item for LR(0), SLR, LR(1), and LALR
+# ptr: pointer. suchs as: S->·bBB, · is pointer
+# "<S : * bBB>" is RulePtr name
 #----------------------------------------------------------------------
 class RulePtr (object):
 
@@ -2408,7 +2510,7 @@ class RulePtr (object):
         assert index <= len(production)
         self.rule = production
         self.index = index
-        self.lookahead = lookahead    # None or a string
+        self.lookahead = lookahead    # None or a string, follow subset(production.head)
         self.__name = None
         self.__hash = None
         self.__text = None
@@ -2428,11 +2530,13 @@ class RulePtr (object):
             return None
         return self.rule.body[self.index]
 
+    # generate new RulePtr object if advance
     def advance (self):
         if self.index >= len(self.rule.body):
             return None
         return RulePtr(self.rule, self.index + 1, self.lookahead)
 
+    # dot is at rightmost production
     @property
     def satisfied (self) -> bool:
         return (self.index >= len(self.rule))
@@ -2514,6 +2618,10 @@ class RulePtr (object):
             self.__name = self.__str__()
         return self.__name
 
+    # vector which follow dot at production
+    # example:
+    #   E -> b * BB
+    #   return [B, B]
     def after_list (self, inc = 0) -> list:
         return [n for n in self.rule.body[self.index + inc:]]
 
@@ -2523,9 +2631,15 @@ class RulePtr (object):
 #----------------------------------------------------------------------
 class LRItemSet (object):
 
-    def __init__ (self, kernel_source):
+    '''
+    圆点不在产生式右部最左边的项目称为内核项，唯一的例外是 S' → • S。因此用 GOTO(I, X)转换函数得到的 J 为转向后状态所含项目集的内核项
+    使用闭包函数(CLOSURE)和转向函数(GOTO(I, X)) 构造文法 G' 的 LR 的项目集规范族
+    '''
+    def __init__ (self, kernel_source: list[RulePtr]):
+        # 内核项
         self.kernel = LRItemSet.create_kernel(kernel_source)
         self.closure = []
+        # 标记非内核项的位置
         self.checked = {}
         self.__hash = None
         self.__name = None
@@ -2537,10 +2651,14 @@ class LRItemSet (object):
         klist.sort()
         return tuple(klist)
 
+    # 内核项作为状态名即可，因为项集的内核项相同，非内核项一定也相同，都是又传播和自发生成而来的
     @staticmethod
     def create_name (kernel_source):
         knl = LRItemSet.create_kernel(kernel_source)
         text = ', '.join([str(n) for n in knl])
+        # 919393 is prime
+        # knl must be tuple instead of list
+        # hash tuple is correct, hash list is incorrect
         h = hash(knl) % 919393
         return 'C' + str(h) + '(' + text + ')'
 
@@ -2599,9 +2717,11 @@ class LRItemSet (object):
     def __iter__ (self):
         return self.closure.__iter__()
 
+    # find all symbols which follow dot
     def find_expecting_symbol (self):
         output = []
         checked = set([])
+        # rp: rule pointer
         for rp in self.closure:
             if rp.next is None:
                 continue
@@ -2614,6 +2734,7 @@ class LRItemSet (object):
         rows = []
         print('STATE(%d): %s'%(self.uuid, self.name))
         for i, rp in enumerate(self.closure):
+            # (K) is kernel, (C) is closure
             t = (i < len(self.kernel)) and '(K)' or '(C)'
             rows.append([' ', i, str(rp), '  ', t])
         text = cstring.tabulify(rows, 0)
@@ -2633,10 +2754,11 @@ class ActionName (IntEnum):
 
 
 #----------------------------------------------------------------------
-# Action
+# Action: include action and goto
 #----------------------------------------------------------------------
 class Action (object):
-    
+
+    # (name: Action.name, target: NextState.uuid | Reduce Production.index, rule: NowProduction)
     def __init__ (self, name: int, target: int, rule: Production = None):
         self.name = name
         self.target = target
@@ -2679,12 +2801,52 @@ class Action (object):
 #----------------------------------------------------------------------
 # LRTable
 #----------------------------------------------------------------------
+'''
+LR(1) Table Example
+
+Production:
+    0, S' -> S
+    1, S  -> L = R
+    2, S  -> R
+    3, L  -> * R
+    4, L  -> id
+    5, R  -> L
+
+LRTable:
+| state |           ACTION              |     GOTO      |
+|       |   *       id      =       $   |   S   L   R   |
+|-------|-------------------------------|---------------|
+|   0   |   s4      s5                  |   1   2   3   |
+|   1   |                          acc  |               |
+|   2   |                   s6      r5  |               |
+|   3   |                           r2  |               |
+|   4   |   s4      s5                  |       8   7   |
+|   5   |                   r4      r4  |               |
+|   6   |   s11     s12                 |       10  9   |
+|   7   |                   r3      r3  |               |
+|   8   |                   r5      r5  |               |
+|   9   |                           r1  |               |
+|   10  |                           r5  |               |
+|   11  |   s11     s12                 |       10  13  |
+|   12  |                           r4  |               |
+|   13  |                           r3  |               |
+
+s: shift,   r: reduce,  acc: accept
+si: shift i state
+ri: reduce i production
+i: shift i state
+where i is 0,1,3...N
+
+tab[0]["id"] = [Action(Action.Shift, 5)]
+tab[9]["$"] = [Action(Action.Reduce, 1)]
+tab[11]["L"] = [Action(Action.Shift, 10)]
+'''
 class LRTable (object):
 
-    def __init__ (self, head):
-        self.head = self.__build_head(head)
+    def __init__ (self, head:list[Symbol]):
+        self.head = self.__build_head(head)     # all non-terminals and terminals
         self.rows = []
-        self.mode = 0
+        self.mode = 0   # mode 0 is set, mode 1 is tuple
 
     def __build_head (self, head):
         terminal = []
@@ -2737,7 +2899,8 @@ class LRTable (object):
             rr[col] = [data]
         return 0
 
-    def add (self, row, col, data):
+    # (row:State.uuid, col:Symbol.name, data:Action)
+    def add (self, row:int, col:str, data:Action):
         if isinstance(col, Symbol):
             col = col.name
         if row >= len(self.rows):
@@ -2817,7 +2980,7 @@ class LR1Analyzer (object):
         self.link = {}          # state switch
         self.backlink = {}      #
         self.tab = None         # LR table
-        self.pending = collections.deque()
+        self.pending = collections.deque()  # BFS state deque
 
     def process (self):
         self.clear()
@@ -2828,7 +2991,7 @@ class LR1Analyzer (object):
         if len(self.g) == 0:
             return 2
         if 'S^' not in self.g.symbol:
-            self.g.argument()
+            self.g.augment()
         hr = self.__build_states()
         if hr != 0:
             return 3
@@ -2882,6 +3045,39 @@ class LR1Analyzer (object):
         self.pending.clear()
         return 0
 
+    """
+    # https://mmmhj2.github.io/%E7%BC%96%E8%AF%91%E5%8E%9F%E7%90%86/2023/01/11/syntax-analysis-bottomup-CLR.html
+    # https://www.cnblogs.com/cyjb/p/ParserLALR.html
+    # 计算 LR1 的 CLOSURE(I)
+    def CLOSURE(I):
+        J = I
+        changed = True
+        # 直到没有新的 [B -> . γ, b] 项加入到 J
+        while changed:
+            changed = False
+            # 对闭包中每一个项 [A -> α . B β, a] ...
+            for item in J:
+                # 对每个产生式 B -> γ ...
+                for prod in productions:
+                    if not item.next == prod.head:
+                        continue
+                    # item.next 是非终结符
+                    # 构造 βa
+                    # vector = β + a
+                    vector = item.after_dot + [item.lookahead]
+                    # 对 FIRST(βa) 中所有终结符号 b, 即为 B -> . γ 的向前符号...
+                    for b in FIRST(vector):
+                        next_pointer = RulePointer(production=prod, index=0, lookahead=b)
+                        if not next_pointer in J:
+                            # 把项 [B -> . γ, b] 加入闭包中
+                            J.append(next_pointer)
+                            changed = True
+        return J
+        # 为什么这里 B -> . γ 的向前符号在 FIRST(βa) 里？假设我们即将根据项 [A -> α . B β, a] 归约, 那么显然我们已经看到了输入 ...α B β a
+        # (这里 a 是向前看符号，显然要求下一个输入是 a 时才能归约），那我们再向前倒推到按照 B -> γ 归约前，就会有 ...α B β a = ...α γ β a,
+        # 就可以看到只有 γ 后跟 βa 时, 才有可能按照 B -> γ 归约，即 B -> γ 的向前看符号在 FIRST(βa) 之中。
+    """
+    # 扩充 LRItemSet，不产生新的 LRItemSet
     def closure (self, cc:LRItemSet) -> LRItemSet:
         cc.clear()
         for n in cc.kernel:
@@ -2892,9 +3088,20 @@ class LR1Analyzer (object):
             LOG_DEBUG('-' * 72)
             LOG_DEBUG('CLOSURE init')
         top = 0
+        '''
+        while 1:
+            changes = 0
+            ....
+            if not changes:
+                break
+
+        similarly:
+            do while
+        '''
         while 1:
             changes = 0
             limit = len(cc.closure)
+            # for A in cc.closure:
             while top < limit:
                 A: RulePtr = cc.closure[top]
                 top += 1
@@ -2903,6 +3110,7 @@ class LR1Analyzer (object):
                     continue
                 if B.term:
                     continue
+                # next A is non-terminal
                 if B.name not in self.g.rule:
                     LOG_ERROR('no production rules for symbol %s'%B.name)
                     raise GrammarError('no production rules for symbol %s'%B.name)
@@ -2930,22 +3138,41 @@ class LR1Analyzer (object):
                 break
         return cc
 
-    def goto (self, cc:LRItemSet, X:Symbol):
+    """
+    # 计算 GOTO(I,X)
+    def GOTO(I:ItemSet, X:Symbol):
+        goto = empty_set()
+        # for 每个项 [A -> α . X β, a]
+        for item in I:
+            # 注意点在产生式末尾的情况
+            if item.next == X:
+                # 把项 [A -> α X . β, a] 加入项集中
+                next_pointer = RulePointer(production=item=item.prod, index=item.index+1, lookahead=item.lookahead)
+                goto.append(next_pointer)
+        goto = CLOSURE(goto)
+        return goto
+    """
+    def goto (self, cc:LRItemSet, X:Symbol) -> LRItemSet:
         kernel = []
         for rp in cc:
             if rp.next is None:
                 continue
             if rp.next.name != X.name:
                 continue
+            # if next is Symbol X
+            # np: next RulePtr
             np = rp.advance()
             if np is None:
                 continue
             kernel.append(np)
         if not kernel:
             return None
+        # 内核项
         nc = LRItemSet(kernel)
+        # 对内核项求 closure，传播和自发生成非内核项，项集中加入非内核项
         return self.closure(nc)
 
+    # 只产生内核项，不求 closure
     def __try_goto (self, cc:LRItemSet, X:Symbol):
         kernel = []
         for rp in cc:
@@ -2981,6 +3208,7 @@ class LR1Analyzer (object):
                 if not changes:
                     break
             else:
+                # BFS
                 if len(self.pending) == 0:
                     break
                 state = self.pending.popleft()
@@ -3008,6 +3236,8 @@ class LR1Analyzer (object):
             changes += 1
         return changes
 
+    # 状态转移表 link[<now state>][<go symbol>] = <next state>
+    #           backlink[<next state>][<back symbol>] = <now state>
     def __create_link (self, c1:LRItemSet, c2:LRItemSet, ss:Symbol):
         assert c1 is not None
         assert c2 is not None
@@ -3041,10 +3271,12 @@ class LR1Analyzer (object):
             # LOG_VERBOSE(
             for rp in state.closure:
                 rp: RulePtr = rp
+                # dot is at rightmost production
                 if rp.satisfied:
                     LOG_VERBOSE("  satisfied:", rp)
                     if rp.rule.head.name == 'S^':
                         if len(rp.rule.body) == 1:
+                            # 增广产生式的 body 只有一个, S^ -> S
                             action = Action(ActionName.ACCEPT, 0)
                             action.rule = rp.rule
                             tab.add(uuid, rp.lookahead.name, action)
@@ -3054,6 +3286,9 @@ class LR1Analyzer (object):
                         action = Action(ActionName.REDUCE, rp.rule.index)
                         action.rule = rp.rule
                         tab.add(uuid, rp.lookahead.name, action)
+                # include ACTION and GOTO table
+                # ACTION[i, a] = sj ; current state i, terminal a, shift s, next state j
+                # GOTO[i, a] = j ; current state i, non-terminal a, next state j
                 elif rp.next.name in link:
                     target = link[rp.next.name]
                     action = Action(ActionName.SHIFT, target, rp.rule)
@@ -3070,12 +3305,22 @@ class LR1Analyzer (object):
 #----------------------------------------------------------------------
 # LALRItemSet
 #----------------------------------------------------------------------
+'''
+LALR: lookahead-LR
+构造 LALR(1) 项目有两种思路。一种是：先构造 LR(1) 项目，再合并同心项目；另一种是：先构造 LR(0) 项目，再为其配上搜索符。介绍第二种方法:
+
+搜索符生成有两种方法。一是，自己生成。二是，上一项目集传播获得的。项目集之间传播搜索符遇到的问题是：若多个项目集可以直接转移到一个项目集 I 上，那么每当 I 接收到，这些项目集传播过来的新的搜索符时，I 就得重新再往下传播自己新的搜索符。
+考虑到这一点可以使用压栈的方式，将可以传播的项目压栈存好，将栈顶弹出用于传播，在传播过程中同时压入新的可传播项目。直到最后栈为空，即没有项目可以传播为止。
+
+Production 相同、圆点位置相同而 lookahead 不同的两个状态，在 LALR (1) 眼里是相同的，在 LR (1) 眼里是不同的。
+因此 lookahead 是一个集合。
+'''
 class LALRItemSet (LRItemSet):
 
     def __init__ (self, kernel_source):
         super(LALRItemSet, self).__init__(kernel_source)
-        self.lookahead = [set([]) for n in range(len(self.kernel))]
-        self.dirty = False
+        self.lookahead = [set([]) for n in range(len(self.kernel))] # set
+        self.dirty = False  # dirty is True if ItemSet modified
 
     def shrink (self):
         while len(self.closure) > len(self.kernel):
@@ -3089,10 +3334,10 @@ class LALRItemSet (LRItemSet):
             if i < len(self.kernel):
                 p = ' ' .join([str(n) for n in self.lookahead[i]])
                 p = '{' + p + '}'
-                t = '(K)'
+                t = '(K)'   # kernel
             else:
                 p = ''
-                t = '(C)'
+                t = '(C)'   # closure
             rows.append([' ', i, str(rp), p, '  ', t])
         text = cstring.tabulify(rows, 0)
         print(text)
@@ -3103,6 +3348,164 @@ class LALRItemSet (LRItemSet):
 #----------------------------------------------------------------------
 # LALR Analyzer
 #----------------------------------------------------------------------
+'''
+G:
+    S -> L = R | R
+    L -> * R | id
+    R -> L
+
+G':
+    S' -> S
+    S -> L = R
+    S -> R
+    L -> * R
+    L -> id
+    R -> L
+
+I0:
+    S' -> . S       (K)
+    S -> . L = R    (C)
+    S -> . R        (C)
+    L -> . * R      (C)
+    L -> . id       (C)
+    R -> . L        (C)
+
+I1:
+    S' -> S .       (K)
+
+I2:
+    S' -> L . = R   (K)
+    R -> L .        (K)
+
+I3:
+    S -> R .        (K)
+
+I4:
+    L -> * . R      (K)
+    R -> . L        (C)
+    L -> . * R      (C)
+    L -> . id       (C)
+
+I5:
+    L -> id .       (K)
+
+I6:
+    S -> L = . R    (K)
+    R -> . L        (C)
+    L -> . * R      (C)
+    L -> . id       (C)
+
+I7:
+    L -> * R .      (K)
+
+I8:
+    R -> L .        (K)
+
+I9:
+    S -> L = R .    (K)
+
+首先删除 LR0 项集中的非内核项, 再求 closure([S' -> . S, #]):
+    S' -> . S       , #     (K)
+    S -> . L = R    , #     (C)
+    S -> . R        , #     (C)
+    L -> . * R      , =/#   (C)
+    L -> . id       , =/#   (C)
+    R -> . L        , #     (C)
+# 是传播向前看符号，= 是自发生成的向前看符号, 其中有 2 项有自发生成的向前看符号
+goto([S' -> . S, #], S)     = [S' -> S ., #]    , [S' -> S .] in I0
+goto([S -> . L = R, #], L)  = [S -> L . = R, #] , [S -> L . = R] in I2
+goto([S -> . R, #], R)      = [S -> R . , #]    , [S -> R .] in I3
+goto([L -> . * R, #], *)    = [L -> * . R, #]   , [L -> * . R] in I4
+goto([L -> . id, #], id)    = [L -> id ., #]    , [L -> id .] in I5
+goto([R -> . L, #], L)      = [R -> L ., #]     , [R -> L .] in I2
+
+goto([L -> . * R, =], *)    = [L -> * . R, =]   , [L -> * . R] in I4
+goto([L -> . id, =], id)    = [L -> id ., =]    , [L -> id .] in I5
+
+现在初始化表格，由于这个表格一开始只包含自发生成的向前看符号，因此表格初始化为：
+| LR0 项集 |        内核项      | 向前看符号, 初始值 |  已经传播过 或者 圆点到终点   |
+|   I0     | S' -> . S         |        $          |           传播              |
+|   I1     | S' -> S .         |                   |            v               |
+|   I2     | S  -> L . = R     |                   |                            |
+|          | R  -> L .         |                   |            v               |
+|   I3     | S  -> R .         |                   |            v               |
+|   I4     | L  -> * . R       |        =          |                            |
+|   I5     | L  -> id .        |        =          |            v               |
+|   I6     | S  -> L = . R     |                   |                            |
+|   I7     | L  -> * R .       |                   |            v               |
+|   I8     | R  -> L .         |                   |            v               |
+|   I9     | S  -> L = R .     |                   |            v               |
+
+只计算 = 的传播, 因此计算 I4 的 closure([L -> * . R, #]) 和 I5 的 closure([L -> id ., #]), 由于 I5 的 [L -> id ., #] 圆点达到终点, 无需其计算闭包。
+    L -> * · R  , #     (K)
+    R -> · L    , #     (C)
+    L -> · * R  , #     (C)
+    L -> · id   , #     (C)
+
+goto([L -> * . R, #], R)    = [L -> * R ., #]   , [L -> * R .] in I7
+goto([R -> . L, #], L)      = [R -> L ., #]     , [R -> L .] in I8
+goto([L -> . * R, #], R)    = [L -> * . R, #]   , [L -> * . R] in I4
+goto([L -> . id, #], id)    = [L -> id ., #]    , [L -> id .] in I5
+
+= 传播到 I7 的 [L -> * R .], I8 的 [R -> L .], I4 的 [L -> * . R], I5 的 [L -> id .]
+因此经过第一趟传播后表格变为：
+| LR0 项集 |        内核项      | 向前看符号, 初始值 |  第一趟 |  已经传播过 或者 圆点到终点   |
+|   I0     | S' -> . S         |        $          |    $   |              v              |
+|   I1     | S' -> S .         |                   |    $   |              v              |
+|   I2     | S  -> L . = R     |                   |    $   |                             |
+|          | R  -> L .         |                   |    $   |              v              |
+|   I3     | S  -> R .         |                   |    $   |              v              |
+|   I4     | L  -> * . R       |        =          |   =/$  |            传播              |
+|   I5     | L  -> id .        |        =          |   =/$  |              v              |
+|   I6     | S  -> L = . R     |                   |        |                             |
+|   I7     | L  -> * R .       |                   |    =   |              v              |
+|   I8     | R  -> L .         |                   |    =   |              v              |
+|   I9     | S  -> L = R .     |                   |        |              v              |
+
+开始进行第二趟传播, I2 的 S -> L . = R 需要计算闭包。计算 closure([S -> L . = R, #]) 得到:
+    S -> L · = R   , #      (K)
+goto([S -> L . = R, #], =)    = [S -> L = . R, #]   , [S -> L = . R] in I6
+
+因此经过第二趟传播后表格变为：
+| LR0 项集 |        内核项      | 向前看符号, 初始值 |  第一趟 |  第二趟 |  已经传播过 或者 圆点到终点   |
+|   I0     | S' -> . S         |        $          |    $   |    $    |              v              |
+|   I1     | S' -> S .         |                   |    $   |    $    |              v              |
+|   I2     | S  -> L . = R     |                   |    $   |    $    |             传播             |
+|          | R  -> L .         |                   |    $   |    $    |              v              |
+|   I3     | S  -> R .         |                   |    $   |    $    |              v              |
+|   I4     | L  -> * . R       |        =          |   =/$  |   =/$   |              v              |
+|   I5     | L  -> id .        |        =          |   =/$  |   =/$   |              v              |
+|   I6     | S  -> L = . R     |                   |        |    $    |                             |
+|   I7     | L  -> * R .       |                   |    =   |   =/$   |              v              |
+|   I8     | R  -> L .         |                   |    =   |   =/$   |              v              |
+|   I9     | S  -> L = R .     |                   |        |         |              v              |
+
+开始进行第三趟传播, I6 的 S -> L = . R 需要计算闭包。计算 closure([S -> L = . R, #]) 得到:
+    S -> L = . R   , #      (K)
+    R -> . L       , #      (C)
+    L -> . * R     , #      (C)
+    L -> . id      , #      (C)
+goto([S -> L = . R, #], R)    = [S -> L = R ., #]   , [S -> L = R .] in I9
+goto([R -> . L, #], L)        = [R -> L ., #]       , [R -> L .] in I8
+goto([L -> . * R, #], *)      = [R -> * . R, #]     , [L -> * . R] in I4
+goto([L -> . id, #], id)      = [L -> id ., #]      , [L -> id .] in I5
+
+因此经过第二趟传播后表格变为：
+| LR0 项集 |        内核项      | 向前看符号, 初始值 |  第一趟 |  第二趟 |  第三趟 |  已经传播过 或者 圆点到终点   |
+|   I0     | S' -> . S         |        $          |    $   |    $    |    $   |              v              |
+|   I1     | S' -> S .         |                   |    $   |    $    |    $   |              v              |
+|   I2     | S  -> L . = R     |                   |    $   |    $    |    $   |              v              |
+|          | R  -> L .         |                   |    $   |    $    |    $   |              v              |
+|   I3     | S  -> R .         |                   |    $   |    $    |    $   |              v              |
+|   I4     | L  -> * . R       |        =          |   =/$  |   =/$   |   =/$  |              v              |
+|   I5     | L  -> id .        |        =          |   =/$  |   =/$   |   =/$  |              v              |
+|   I6     | S  -> L = . R     |                   |        |    $    |    $   |             传播             |
+|   I7     | L  -> * R .       |                   |    =   |   =/$   |   =/$  |              v              |
+|   I8     | R  -> L .         |                   |    =   |   =/$   |   =/$  |              v              |
+|   I9     | S  -> L = R .     |                   |        |         |    $   |              v              |
+结束, 将最后一次传播的向前看符号加入到 LR(0) 项集中, 得到 LALR 项集。
+
+'''
 class LALRAnalyzer (object):
 
     def __init__ (self, g: Grammar):
@@ -3178,7 +3581,7 @@ class LALRAnalyzer (object):
         if len(self.g) == 0:
             return 2
         if 'S^' not in self.g.symbol:
-            self.g.argument()
+            self.g.augment()
         error = self.__LR0_build_states()
         if error > 0:
             return 3
@@ -3199,13 +3602,14 @@ class LALRAnalyzer (object):
             changes = 0
             limit = len(cc)
             while top < limit:
-                A = cc.closure[top]
+                A: RulePtr = cc.closure[top]
                 top += 1
                 B = A.next
                 if B is None:
                     continue
                 if B.term:
                     continue
+                # next A is non-terminal
                 if B.name not in self.g.rule:
                     LOG_ERROR('no production rules for symbol %s'%B.name)
                 for rule in self.g.rule[B.name]:
@@ -3257,10 +3661,11 @@ class LALRAnalyzer (object):
         assert len(g.rule[g.start.name]) == 1
         rule = self.g.rule[g.start.name][0]
         lp = RulePtr(rule, 0)
-        state = LALRItemSet([lp])
+        state = LALRItemSet([lp])   # 实际上是 LR0 项集，构造 LR0 项集不带 lookahead
         self._LR0_closure(state)
         self.append(state)
         while 1:
+            # BFS
             if len(self.pending) == 0:
                 break
             state = self.pending.popleft()
@@ -3314,10 +3719,44 @@ class LALRAnalyzer (object):
         self.la.closure(cc)
         return cc
 
+    '''
+    LALR 项集是可以直接根据 LR (1) 项集合并而来的，但构造 LR (1) 项集族的时间和空间成本都比较高，更实用的是根据 LR (0) 项集族，通过一个 “传播和自发生成” 过程直接生成向前看符号，高效计算 LALR 项的内核。
+        1. 假设项集 I 包含项 [A -> α . β, a], 且 goto(I, X) = J。无论 a 为何值，在 goto(closure([A -> α . β, a]), X) 时得到的结果中总是包含 [B -> γ . δ, b]。那么对于 B -> γ . δ 来说, 向前看符号 b 就是自发生成的。
+        2. 其他条件相同，但有 a = b, 且结果中包含 [B -> γ . δ, b] 的原因是项 A -> α . β 有一个向前看符号 b, 那我们就说向前看符号 b 从 I 的项 A -> α . β 传播到了 J 的项 B -> γ . δ 中。需要注意的是，这里的传播关系与特定向前看符号无关，要么所有向前看符号都从一个项传播到另一个项，要么都不传播。
+
+    找到每个 LR (0) 项集中自发生成的向前看符号，和向前看符号的传播过程，就可以为 LR (0) 项添加上正确的向前看符号了。
+
+    首先需要选择一个不在当前文法中的符号 #，由于它不在文法当中，所以不可能被自发生成。如果计算后的向前看符号是否包含 #，说明向前看符号发生了传播，其它向前看符号就是自发生成的。
+        1. 为当前项集 I 中的每个项 A -> α . β 计算 J = LR1_closure([A -> α . β, #]), 其中 J 中包含一项 [B -> γ . X δ, a/#]。
+        2. 如果 [B -> γ . X δ, a] 在 J 中, 且 a != #, 那么 goto(I, X) 中的项 B -> γ X . δ 的向前看符号 a 时自发生成的。
+        3. 如果 [B -> γ . X δ, #] 在 J 中, 那么向前看符号会从 I 中的项 A -> α . β 传播到 goto(I, X) 中的项 B -> γ X . δ 上。
+
+    伪代码：
+    令 # 为一个不在当前文法中的符号
+    for (LR0 项集 I 的内核项集 K 中的每一个项 A -> α . β) {
+        构造产生式 [A -> α . β, #]
+        J = LR1_closure([A -> α . β, #])
+        for (LR1 项集闭包 J 中的每一项 [B -> γ . X δ, a/#]) {
+            [B -> γ . X δ, a] 向前移进一位 B -> γ X . δ, lookahead = None (存在于 goto(I, X) 项集中)
+            if ([B -> γ . X δ, a] 在 J 中，且 a != #)
+                goto(I, X) 中的项 B -> γ X . δ 的向前看符号 a 时自发生成的。
+                即下一项集的 lookahead 是由上一项集生成而来的。
+            if ([B -> γ . X δ, #] 在 J 中)
+                向前看符号会从 I 中的项 A -> α . β 传播到 goto(I, X) 中的项 B -> γ X . δ 上。
+        }
+    }
+
+    确定了向前看符号的自发生和传播过程，就可以不断在项集间传播向前看符号直到停止。
+        1. 首先，每个项集只包含其自发生成的向前看符号。
+        2. 不断扫描每个项集，确定当前项集 I 可以将向前看符号传播到哪些项集，并将 I 的向前看符号添加到被传播到的项集中。
+        3. 不断重复步骤 2, 直到每个项集的向前看符号都不再增加。
+    '''
     def _LALR_propagate_state (self, state:LALRItemSet) -> int:
         LOG_VERBOSE('propagate', state.uuid)
         for key, kernel in enumerate(state.kernel):
-            rule_ptr = RulePtr(kernel.rule, kernel.index, PSHARP)
+            # 对每个内核项的产生式求 closure
+            rule_ptr = RulePtr(kernel.rule, kernel.index, PSHARP)   # PSHARP is #, # is not in grammar
+            # 对每个内核项产生式构造带有 lookahead 的 LR1 项集闭包
             closure = self._LR1_create_closure([rule_ptr])
             for _id, rp in enumerate(closure.closure):
                 # print('RP', rp)
@@ -3330,32 +3769,37 @@ class LALRAnalyzer (object):
                 assert state.uuid in self.link
                 link = self.link[state.uuid]
                 assert expected.name in link
-                ns: LALRItemSet = self.state[link[expected.name]]
+                ns: LALRItemSet = self.state[link[expected.name]]   # next state = goto(state, next symbol)
                 # print('    ns: uuid', ns.uuid, 'kernel', [str(k) for k in ns.kernel])
                 advanced: RulePtr = rp.advance()
                 assert advanced
-                found = -1
+                next_found = -1  # 查找当前项集内核项的产生式移进一位后与下一个项集内核项的产生式的位置
                 advanced.lookahead = None
                 # print('    advanced: ', advanced)
-                for j, nk in enumerate(ns.kernel):
+                for j, nk in enumerate(ns.kernel):  # next kernel
                     # print('nk', nk)
                     if advanced == nk:
-                        found = j
+                        next_found = j
                         break
-                assert found >= 0
+                assert next_found >= 0
                 if rp.lookahead is None:
                     LOG_ERROR('lookahead should not be None')
                     assert rp.lookahead is not None
-                elif rp.lookahead == PSHARP:
+                elif rp.lookahead == PSHARP:    # 当前内核项的产生式
+                    # 向前看符号发生传播
                     if state.uuid not in self.route:
                         self.route[state.uuid] = {}
                     route = self.route[state.uuid]
                     if key not in route:
                         route[key] = []
-                    route[key].append((ns.uuid, found))
-                    # print('    new route: %s to %s'%(key, (ns.uuid, found)))
+                    # 闭包中所有项都有 #, 都会向前传播到其他的项集
+                    # rout[current state][kernel production pos at current state] = [(next state, next production pos at next state) ... ]
+                    route[key].append((ns.uuid, next_found))
+                    # print('    new route: %s to %s'%(key, (ns.uuid, next_found)))
                 else:
-                    ns.lookahead[found].add(rp.lookahead)
+                    # 向前看符号自发生成
+                    # 下一项集的 lookahead 是由上一项集生成而来的
+                    ns.lookahead[next_found].add(rp.lookahead)
         if state.uuid == 0:
             assert len(state.kernel) > 0
             kernel: RulePtr = state.kernel[0]
@@ -3366,7 +3810,7 @@ class LALRAnalyzer (object):
 
     def __build_propagate_route (self):
         for uuid in self.state:
-            state: LALRItemSet = self.state[uuid]
+            state: LALRItemSet = self.state[uuid]   # 不带 lookahead 的 LR0 项集
             state.shrink()
             state.dirty = True
             self._LALR_propagate_state(state)
@@ -3456,7 +3900,7 @@ class ConflictSolver (object):
         return 0
 
     def warning_rule (self, rule:Production, text:str):
-        anchor = self.g.anchor_get(rule)
+        anchor = self.g.anchor_get(rule)    # (filename, line_num)
         if anchor is None:
             LOG_ERROR('warning: %s'%text)
             return 0
@@ -3669,7 +4113,7 @@ class Lexer (object):
         t = Token(self.literal[name], name, token.line, token.column)
         return t
 
-    def tokenize (self, code):
+    def tokenize (self, code) -> Generator[Token, None, None]:
         rules = [n for n in self.rules]
         for literal in self.literal:
             escape = re.escape(literal)
@@ -3705,7 +4149,7 @@ class PushDownInput (object):
     def __init__ (self, g:Grammar):
         self.g: Grammar = g
         self.lexer: Lexer = None
-        self.it = None
+        self.it: collections.Iterator = None
         self.eof: bool = False
         self.matcher = None
 
@@ -3780,8 +4224,37 @@ class MatchAction (object):
 
 
 #----------------------------------------------------------------------
-# LR Push Down Automata
+# LR Push Down Automata 下推自动机
 #----------------------------------------------------------------------
+'''
+@web: https://www.cnblogs.com/bryce1010/p/9387114.html
+采用下推自动机这种数据模型。包括以下几个部分：
+    1. 输入带：输入的 Token 流。
+    2. 分析栈：包括状态栈和文法符号栈两部分。(state_0, None) 为分析开始前预先放在栈里的初始状态和句子括号。
+    3. LR 分析表：包括动作表(ACTION)和状态转移表(GOTO)两张表。
+
+PDA 算法：
+置 ip 指向输入串 w 的第一个符号
+    令 Si 为栈顶状态
+    a 是 ip 指向的符号（当前输入符号）
+    PUSH S0, None (进栈)
+    BEGIN (重复开始)
+        IF ACTION[Si,a]=Sj THEN
+            BEGIN
+                PUSH j,a (进栈)
+                ip 前进 (指向下一输入符号)
+            END
+        ELSE IF ACTION[Si,a]=rj (若第 j 条产生式为 A→β) THEN
+            BEGIN
+                pop |β| 项（弹出 β 长度的项）
+                若当前栈顶状态为 Sk:
+                    push GOTO[Sk,A] , A (进栈)
+            END
+        ELSE IF ACTION[Si,a]=acc THEN
+            return (成功）
+        ELSE error
+    END. (重复结束)
+'''
 class PDA (object):
 
     def __init__ (self, g:Grammar, tab:LRTable):
@@ -3790,7 +4263,7 @@ class PDA (object):
         self.input: PushDownInput = PushDownInput(self.g)
         self.state_stack = []
         self.symbol_stack = []
-        self.value_stack = []
+        self.value_stack = []   # token value
         self.current = None
         self._semantic_action = None
         self._lexer_action = None
@@ -3853,12 +4326,15 @@ class PDA (object):
             self.error = 'unexpected token: %r'%lookahead
             self.error_token(lookahead, self.error)
             return -5
+        assert len(data) == 1   # if len(data) > 1, maybe happen to conflict (shift and reduce conflict)
         action: Action = list(data)[0]
         if not action:
             self.error = 'invalid action'
             self.error_token(lookahead, 'invalid action:', str(action))
             return -6
         retval = 0
+        # if shift, push state_stack
+        # if reduce, pop state_stack
         if action.name == ActionName.SHIFT:
             symbol: Symbol = Symbol(lookahead.name, True)
             newstate: int = action.target
@@ -3869,6 +4345,7 @@ class PDA (object):
             if self.debug:
                 print('action: shift/%d'%action.target)
             retval = 1
+        # shift after reduce
         elif action.name == ActionName.REDUCE:
             retval = self.__proceed_reduce(action.target)
         elif action.name == ActionName.ACCEPT:
@@ -3907,7 +4384,7 @@ class PDA (object):
         name = actname
         if name.startswith('{') and name.endswith('}'):
             name = name[1:-1].strip()
-        callback = self._semantic_action
+        callback = self._semantic_action    # class
         if not hasattr(callback, name):
             raise KeyError('action %s is not defined'%actname)
         func = getattr(callback, name)
@@ -3943,6 +4420,7 @@ class PDA (object):
                 if hr > 0:
                     value = vv
                     executed += 1
+        # if not action, use default action
         if executed == 0:
             args = self.__generate_args(size)
             value = Node(rule.head, args[1:])
@@ -3952,6 +4430,7 @@ class PDA (object):
         rule: Production = self.g.production[target]
         size = len(rule.body)
         value = self.__rule_eval(rule)
+        # pop by length(body of production)
         for i in range(size):
             self.state_stack.pop()
             self.symbol_stack.pop()
@@ -4130,6 +4609,44 @@ if __name__ == '__main__':
                                algorithm = 'lr1')
         print(parser('1+2*3'))
         return 0
-    test4()
+    def test5():
+        g = load_from_file('grammar/func.ebnf')
+        g.print()
+        print()
 
+        ga = GrammarAnalyzer(g)
+        ga.process()
+        ga.print_epsilon()
+        ga.print_first()
 
+        la = LR1Analyzer(g)
+        la.process()
+        import pprint
+        pprint.pprint(la.link)
+        # g.print()
+        print()
+
+        for uuid, state in la.state.items():
+            state.print()
+        print(len(la.state))
+        tab: LRTable = la.tab
+        tab.print()
+        print()
+
+        class Func:
+            def get_id(self, rule, args):
+                return args[1]
+            def get_func(self, rule, args):
+                return [args[1], args[3]]
+            def get_null(self, rule, args):
+                return None
+            def get(self, rule, args):
+                return args[1]
+            def get_list(self, rule, args):
+                return [args[1]] + [args[3]]
+        parser = create_parser_from_file("grammar/func.ebnf",
+                                        Func(),
+                                        algorithm = 'lalr')
+        print(parser("max(min(1, 2), max(1, 2))"))
+        return 0
+    test5()

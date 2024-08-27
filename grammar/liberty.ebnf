@@ -1,0 +1,45 @@
+# vim: set ts=4 sw=4 tw=0 et nocindent :
+
+# 定义终结符
+%token NUMBER
+%token STRING
+%token ID
+
+start: key_datum                    {get1}
+     ;
+
+key_datum: atom ':' atom ';'                          {get_dict}
+         | atom '(' argument_list ')' function_field  {get_function}
+         ;
+
+function_field: ';'                 {get_null}
+              | '{' key_data '}'    {get_function_field}
+              ;
+
+key_data: key_data key_datum        {key_datum_many}
+        | key_datum                 {key_datum_one}
+        ;
+
+argument_list: argument_list ',' atom       {list_many}
+             | atom                         {list_one}
+             |                              {list_empty}
+             ;
+
+atom: ID            {get1}
+    | NUMBER        {get_number}
+    | STRING        {get_string}
+    ;
+
+# 词法：忽略空白
+@ignore [ \r\n\t]*
+
+# 词法：忽略注释
+@ignore /\*.*(\n.*)?\*/
+
+# 词法：忽略续行
+@ignore \\
+
+# 词法：匹配 NUMBER 和 STRING
+@match NUMBER [+-]?\d+(\.\d*)?
+@match STRING "(?:\\.|[^"\\])*"
+@match ID [_\w][\w\d]*(\[\d+\])*

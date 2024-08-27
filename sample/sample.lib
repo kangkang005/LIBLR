@@ -1,0 +1,61 @@
+/* comment */
+/* comment
+*/
+library (MC) {
+    revision : 1.0;
+    nom_voltage : 1;
+    lut_table_template(CELL_DELAY) {
+        variable_1 : input_net_transition;
+        variable_2 : total_output_net_capacitance;
+        index_1 ("0.004,0.05,0.1,0.2,0.5,0.75,1.0");
+        index_2 ("0.001,0.02,0.05,0.1,0.25,0.3,0.35");
+    }
+    lut_table_template(CONSTRAINT) {
+        variable_1 : related_pin_transition;
+        variable_2 : constrained_pin_transition;
+        index_1 ("0.004,0.05,0.1,0.2,0.5,0.75,1.0");
+        index_2 ("0.004,0.05,0.1,0.2,0.5,0.75,1.0");
+    }
+    cell (cell_name) {
+        bus (A[1]) {
+            bus_type        : address_bus;
+            direction       : input;
+            capacitance     : 0.010971;
+            max_transition  : 1.0;
+            switch_pin      : false;
+
+            related_power_pin   : "VDD";
+            related_ground_pin  : "VSS";
+
+            timing() {
+                timing_type     : setup_rising;
+                related_pin     : "CK";
+                when            : "!CEB";
+                rise_constraint(CONSTRAINT) {
+                    values("0.0472,0.0521,0.0472,0.0521", \
+                        "0.04,0.0521,0.0472,0.0521");
+                }
+            }
+            timing() {
+                timing_type     : setup_hold;
+                related_pin     : "CK";
+                when            : "!CEB";
+                rise_constraint(CONSTRAINT) {
+                    values("0.0472,0.0521,0.0472,0.0521", \
+                        "0.04,0.0521,0.0472,0.0521");
+                }
+            }
+            interface_timing : true;
+            dont_use         : true;
+        }
+
+        pin(EMCE) {
+            direction : input;
+            capacitance : 0.001985;
+            max_transition : false;
+            switch_pin : false;
+            related_power_pin : "VDD";
+            related_ground_pin : "VSS";
+        }
+    }
+}

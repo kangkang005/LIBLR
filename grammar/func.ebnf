@@ -1,0 +1,9 @@
+func: ID '(' list ')' {get_func} ;
+elem: ID {get_id} | func {get} | {get_null} ;
+list: list ',' elem {get_list} | elem {get};
+
+%token ID
+
+@ignore [ \r\n\t]*
+
+@match ID [_\w][\w\d]*(\[\d+\])*
