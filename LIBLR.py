@@ -1553,6 +1553,7 @@ class GrammarLoader (object):
             if isinstance(self.code, bytes):
                 self.code = self.code.decode('utf-8', 'ignore')
         self.file_name = file_name and file_name or '<buffer>'
+        # hr: hResult, here's the result，API 的返回值
         hr = self._scan_grammar()
         if hr != 0:
             print('loading failed %d'%hr)
@@ -1887,7 +1888,7 @@ MARK_VISITED = 2
 
 EPSILON = Symbol('', False)
 EOF = Symbol('$', True)
-PSHARP = Symbol('#', True)  # SPHARP(#) is not in grammar
+PSHARP = Symbol('#', True)  # P SHARP(#) is not in grammar
 
 
 #----------------------------------------------------------------------
@@ -1986,6 +1987,43 @@ class GrammarAnalyzer (object):
                 self.nonterminal[info.name] = info.symbol
         return 0
 
+    '''
+    https://zhuanlan.zhihu.com/p/31301086
+    基本情况
+        X -> a Y
+            FIRST(X) U= {a}
+    归纳情况
+        X -> Y1 ... Yn
+            FIRST(X) U= FIRST(Y1), add FIRST(Y1) to FRIST(X)
+            if Y1 -> ε, FIRST(X) U= FIRST(Y2)
+            if Y1, Y2 -> ε,, FIRST(X) U= FIRST(Y3)
+    ......
+
+    FIRST 集的完整不动点算法:
+    foreach (symbol S)
+        if (S is terminal T)
+            FIRST(T) = {T}      # T: terminal
+        else (S is non-terminal)
+            FIRST(N) = {}       # N: non-terminal
+
+    while 1     # some set is changing  某一些符号的集合还在增大
+        change = 0
+        foreach (production p: N -> β1 ... βn)
+            foreach (βi from β1 upto βn)
+                if (βi == a ...)   # terminal
+                    if (a not in FIRST(N))  # FIRST(N) 集合中没有 a
+                        FIRST(N) U= {a}
+                        change += 1         # 说明集合已经增大
+                    break
+                if (βi == M ...)   # non-terminal
+                    if (FIRST(N) U FIRST(M) != FIRST(N))    # FIRST(N) 集合没有包含 FIRST(M)
+                        FIRST(N) U= FIRST(M)
+                        change += 1         # 说明集合已经增大
+                if (ε is not in FIRST(M))
+                    break
+        if (not change)
+            break
+    '''
     def __update_first_set (self):
         self.FIRST.clear()
         for name in self.g.symbol:
@@ -2004,6 +2042,7 @@ class GrammarAnalyzer (object):
                     first = self.__calculate_first_set(rule.body)
                     # add terminal, which not in self.FIRST, in "first" to "self.FIRST"
                     for n in first:
+                        # 如果 n 不存在 first 集合中，加入集合中并且标注已经被修改过
                         if n not in self.FIRST[symbol]:
                             self.FIRST[symbol].add(n)
                             changes += 1
@@ -2035,6 +2074,30 @@ class GrammarAnalyzer (object):
             output.add(EPSILON.name)
         return output
 
+    '''
+    FOLLOW 集的不动点算法:
+    foreach (nonterminal N)
+        FOLLOW(N) = {}
+    while 1     # (some set is changing)
+        change = 0
+        foreach (production p: N -> β1 ... βn)
+            temp = FOLLOW(N)     # temp 记录在 βn 的后面
+            foreach (βi from βn downto β1)   # 逆序 !!! 逆序的 FOLLOW。
+                if (βi == a...)  # terminal
+                    temp = {a}
+                if (βi == M ...)    # non-terminal
+                    if (temp not in FOLLOW(M))
+                        FOLLOW(M) U= temp
+                        change += 1
+                    if (ε is not in FIRST(M))
+                        temp = FIRST(M)
+                    else
+                        temp U= FIRST(M)   # 如果 M 是 NULLABLE, 那么我们不仅仅能看
+                                           # 到FIRST(M),还能 M 的FIRST(M)后面的元素，
+                                           # 也就是非最右项的其余右项。
+        if (not change)
+            break
+    '''
     def __update_follow_set (self):
         self.FOLLOW.clear()
         start = self.g.start
@@ -3450,7 +3513,7 @@ goto([L -> . id, #], id)    = [L -> id ., #]    , [L -> id .] in I5
 = 传播到 I7 的 [L -> * R .], I8 的 [R -> L .], I4 的 [L -> * . R], I5 的 [L -> id .]
 因此经过第一趟传播后表格变为：
 | LR0 项集 |        内核项      | 向前看符号, 初始值 |  第一趟 |  已经传播过 或者 圆点到终点   |
-|   I0     | S' -> . S         |        $          |    $   |              v              |
+|   I0     | S' -> . S         |        $          |    $   |              1              |
 |   I1     | S' -> S .         |                   |    $   |              v              |
 |   I2     | S  -> L . = R     |                   |    $   |                             |
 |          | R  -> L .         |                   |    $   |              v              |
@@ -3468,12 +3531,12 @@ goto([S -> L . = R, #], =)    = [S -> L = . R, #]   , [S -> L = . R] in I6
 
 因此经过第二趟传播后表格变为：
 | LR0 项集 |        内核项      | 向前看符号, 初始值 |  第一趟 |  第二趟 |  已经传播过 或者 圆点到终点   |
-|   I0     | S' -> . S         |        $          |    $   |    $    |              v              |
+|   I0     | S' -> . S         |        $          |    $   |    $    |              1              |
 |   I1     | S' -> S .         |                   |    $   |    $    |              v              |
 |   I2     | S  -> L . = R     |                   |    $   |    $    |             传播             |
 |          | R  -> L .         |                   |    $   |    $    |              v              |
 |   I3     | S  -> R .         |                   |    $   |    $    |              v              |
-|   I4     | L  -> * . R       |        =          |   =/$  |   =/$   |              v              |
+|   I4     | L  -> * . R       |        =          |   =/$  |   =/$   |              2              |
 |   I5     | L  -> id .        |        =          |   =/$  |   =/$   |              v              |
 |   I6     | S  -> L = . R     |                   |        |    $    |                             |
 |   I7     | L  -> * R .       |                   |    =   |   =/$   |              v              |
@@ -3492,12 +3555,12 @@ goto([L -> . id, #], id)      = [L -> id ., #]      , [L -> id .] in I5
 
 因此经过第二趟传播后表格变为：
 | LR0 项集 |        内核项      | 向前看符号, 初始值 |  第一趟 |  第二趟 |  第三趟 |  已经传播过 或者 圆点到终点   |
-|   I0     | S' -> . S         |        $          |    $   |    $    |    $   |              v              |
+|   I0     | S' -> . S         |        $          |    $   |    $    |    $   |              1              |
 |   I1     | S' -> S .         |                   |    $   |    $    |    $   |              v              |
-|   I2     | S  -> L . = R     |                   |    $   |    $    |    $   |              v              |
+|   I2     | S  -> L . = R     |                   |    $   |    $    |    $   |              3              |
 |          | R  -> L .         |                   |    $   |    $    |    $   |              v              |
 |   I3     | S  -> R .         |                   |    $   |    $    |    $   |              v              |
-|   I4     | L  -> * . R       |        =          |   =/$  |   =/$   |   =/$  |              v              |
+|   I4     | L  -> * . R       |        =          |   =/$  |   =/$   |   =/$  |              2              |
 |   I5     | L  -> id .        |        =          |   =/$  |   =/$   |   =/$  |              v              |
 |   I6     | S  -> L = . R     |                   |        |    $    |    $   |             传播             |
 |   I7     | L  -> * R .       |                   |    =   |   =/$   |   =/$  |              v              |
@@ -3794,6 +3857,7 @@ class LALRAnalyzer (object):
                         route[key] = []
                     # 闭包中所有项都有 #, 都会向前传播到其他的项集
                     # rout[current state][kernel production pos at current state] = [(next state, next production pos at next state) ... ]
+                    # rout[current state][kernel production pos at current state][next state] = next production pos at next state
                     route[key].append((ns.uuid, next_found))
                     # print('    new route: %s to %s'%(key, (ns.uuid, next_found)))
                 else:
@@ -3811,7 +3875,7 @@ class LALRAnalyzer (object):
     def __build_propagate_route (self):
         for uuid in self.state:
             state: LALRItemSet = self.state[uuid]   # 不带 lookahead 的 LR0 项集
-            state.shrink()
+            state.shrink()      # 删除非内核项
             state.dirty = True
             self._LALR_propagate_state(state)
             # break
@@ -3819,6 +3883,7 @@ class LALRAnalyzer (object):
 
     def __propagate_state (self, state:LALRItemSet) -> int:
         changes = 0
+        # 说明该项集是最后的传播项, 不再指向下一项集。因此最后一次传播结束, 将该项集从栈弹出
         if state.uuid not in self.route:
             state.dirty = False
             if state.uuid in self.dirty:
@@ -3830,21 +3895,24 @@ class LALRAnalyzer (object):
                 continue
             lookahead = state.lookahead[key]
             for new_uuid, kid in route[key]:
+                # next ItemSet uuid, next production pos at next ItemSet
                 cc: LALRItemSet = self.state[new_uuid]
                 assert kid < len(cc.kernel)
                 for symbol in lookahead:
-                    if symbol not in cc.lookahead[kid]:
+                    # 传播 lookahead: 将当前项集的 lookahead 添加到下一项集的 lookahead
+                    if symbol not in cc.lookahead[kid]: # 下一项集的一个产生式的 lookahead 集合
                         cc.lookahead[kid].add(symbol)
                         cc.dirty = True
-                        self.dirty.add(cc.uuid)
+                        self.dirty.add(cc.uuid)  # 下一项集进栈
                         changes += 1
         state.dirty = False
         if state.uuid in self.dirty:
-            self.dirty.remove(state.uuid)
+            self.dirty.remove(state.uuid)   # 当前项集弹栈
         return changes
 
     def __build_lookahead (self):
         self.dirty.clear()
+        # 将所有的项集压入栈
         for uuid in self.state:
             self.dirty.add(uuid)
         while 1:
@@ -3856,6 +3924,7 @@ class LALRAnalyzer (object):
                     break
             else:
                 changes = 0
+                # list 包裹集合, for 循环时可以对集合进行修改; 直接对集合修改会报错
                 for uuid in list(self.dirty):
                     state = self.state[uuid]
                     changes += self.__propagate_state(state)
