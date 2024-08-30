@@ -210,7 +210,7 @@ def load_symbol (source):
 #----------------------------------------------------------------------
 class Vector (object):
 
-    def __init__ (self, vector):
+    def __init__ (self, vector:list):
         # 产生式的右边
         self.m = tuple(self.__load_vector(vector))
         self.__hash = None
@@ -326,7 +326,7 @@ class Vector (object):
 #----------------------------------------------------------------------
 class Production (object):
 
-    def __init__ (self, head, body, index = -1):
+    def __init__ (self, head, body:list, index = -1):
         self.head = load_symbol(head)
         self.body = Vector(body)
         self.__hash = None
@@ -2909,7 +2909,7 @@ class LRTable (object):
     def __init__ (self, head:list[Symbol]):
         self.head = self.__build_head(head)     # all non-terminals and terminals
         self.rows = []
-        self.mode = 0   # mode 0 is set, mode 1 is tuple
+        self.mode = 0   # mode 0 is set, mode 1 is list
 
     def __build_head (self, head):
         terminal = []
@@ -3948,6 +3948,209 @@ class LALRAnalyzer (object):
         self.la.backlink = self.backlink
         return 0
 
+#----------------------------------------------------------------------
+# LLTable
+#----------------------------------------------------------------------
+class LLTable (object):
+
+    def __init__ (self):
+        self.terminal = set()
+        self.rows = {}
+        self.nonterminal = set()
+
+    # (row: non-terminal, col: terminal)
+    def add (self, row:str, col:str, data:Production):
+        if isinstance(row, Symbol):
+            row = row.name
+        if isinstance(col, Symbol):
+            col = col.name
+        if row not in self.rows:
+            self.rows[row] = {}
+        rr = self.rows[row]
+        if col not in rr:
+            rr[col] = set([])
+        rr[col].add(data)
+        self.nonterminal.add(row)
+        self.terminal.add(col)
+        return 0
+
+    def print (self):
+        conflict = []
+        rows = []
+        head = [''] + [str(n) for n in self.terminal]
+        rows.append(head)
+        for row in self.nonterminal:
+            body = [str(row)]
+            for col in self.terminal:
+                if col not in self.rows[row]:
+                    body.append('')
+                else:
+                    p = self.rows[row][col]
+                    text = ' '.join([str(x) for x in p])
+                    body.append(text)
+                    if len(p) > 1:
+                        conflict.append((row, col))
+            rows.append(body)
+        text = cstring.tabulify(rows, 1)
+        print(text)
+        if len(conflict) > 0:
+            print()
+            print("Conflict:")
+            for c in conflict:
+                print(f"({c[0]}, {c[1]}) -> {' '.join([str(x) for x in self.rows[c[0]][c[1]]])}")
+        return 0
+
+#----------------------------------------------------------------------
+# LL1Analyzer: modify grammar if exist backtrack or left recursion
+#----------------------------------------------------------------------
+class LL1Analyzer (object):
+
+    def __init__ (self, g: Grammar):
+        self.g = g
+        self.ga = GrammarAnalyzer(self.g)
+        self.tab = None         # LR table
+
+    def process (self):
+        self.__eliminate_left_recursion()
+        self.__eliminate_backtrack()
+        self.ga = GrammarAnalyzer(self.g)
+        self.ga.process()
+        error = self.ga.check_grammar()
+        if error > 0:
+            return 1
+        if len(self.g) == 0:
+            return 2
+        hr = self.__build_table()
+        if hr != 0:
+            return 3
+        return 0
+
+    def __eliminate_direct_left_recursion (self, name, productions:list):
+        left_recursive_productions = [copy.copy(production) for production in productions if production.body and production.body[0] == name]
+        other_productions = [copy.copy(production) for production in productions if production not in left_recursive_productions]
+
+        if not left_recursive_productions:
+            return {name: other_productions}
+
+        new_name = name + '\''
+        while new_name in self.g.symbol:
+            new_name = new_name + '\''
+        for i in range(len(left_recursive_productions)):
+            production = left_recursive_productions[i]
+            left_recursive_productions[i] = Production(new_name, Vector(list(production.body[1:]) + [Symbol(new_name)]))
+        left_recursive_productions.append(Production(new_name, Vector([])))
+
+        for i in range(len(other_productions)):
+            production = other_productions[i]
+            other_productions[i] = Production(production.head, Vector(list(production.body[:]) + [Symbol(new_name)]))
+
+        return {name: other_productions, new_name: left_recursive_productions}
+
+    def __eliminate_left_recursion (self):
+        # dict to list, index can search list
+        rule = [(head_name, productions) for head_name, productions in self.g.rule.items()]
+        new_rule = {}
+
+        for i in range(len(rule)):
+            for j in range(i):
+                change = 0
+                for k in range(len(rule[i][1])):    # rule[i][1] -> productions
+                    if not rule[i][1][k].body:      # rule[i][1][k] -> production
+                        continue
+                    if rule[i][1][k].body[0] == rule[j][0]:     # rule[j][0] -> head
+                        for h in range(len(rule[j][1])):
+                            production = rule[j][1][h]
+                            new_production = Production(rule[i][0], Vector(production.body[:] + rule[i][1][k].body[1:]))
+                            rule[i][1].append(new_production)
+                        del rule[i][1][k]
+                        # new_rule.pop(rule[j][0])
+                        change += 1
+                # need remove or not
+                if change:
+                    for h in range(i, len(rule)):
+                        for g in range(len(rule[h][1])):
+                            if h == i:
+                                if rule[j][0] in rule[h][1][g].body and rule[h][1][g].body and rule[j][0] != rule[h][1][g].body[0]:
+                                    change = 0
+                            else:
+                                if rule[j][0] in rule[h][1][g].body:
+                                    change = 0
+                if change:
+                    new_rule.pop(rule[j][0], None)
+            new_rule.update(self.__eliminate_direct_left_recursion(*rule[i]))
+
+        self.g.production = []
+        for head_name, productions in new_rule.items():
+            self.g.production.extend(productions)
+        self.g.update()
+        self.g.start = self.g.production[0].head
+        # self.g.print()
+
+    def __eliminate_backtrack (self):
+        while 1:
+            change = 0
+            for head_name, productions in self.g.rule.items():
+                common_left_factor = []
+                for production in productions:
+                    if not common_left_factor:
+                        # common_prefix, [production.index ...]
+                        common_left_factor.append([copy.copy(production.body), [production.index]])
+                    else:
+                        prefix_len = 0
+                        for clf in common_left_factor:
+                            prefix = clf[0]
+                            for i in range(min(len(prefix), len(production))):
+                                if prefix[i] != production.body[i]:
+                                    break
+                                prefix_len += 1
+                            if prefix_len:
+                                clf[0] = Vector(prefix[0:prefix_len])
+                                clf[1].append(production.index)
+                        if not prefix_len:
+                            common_left_factor.append([copy.copy(production.body), [production.index]])
+                # from pprint import pprint
+                # pprint(common_left_factor)
+                new_name = head_name + '\''
+                for clf in common_left_factor:
+                    prefix = clf[0]
+                    if len(clf[1]) == 1:
+                        continue
+                    change += 1
+                    while new_name in self.g.symbol:
+                        new_name = new_name + '\''
+                    new_symbol = Symbol(new_name)
+                    for index in clf[1]:
+                        production = self.g[index]
+                        replace_production = Production(new_symbol, production.body[len(prefix):])
+                        self.g.replace(index, replace_production)
+                    new_production = Production(head_name, Vector(list(prefix[:]) + [new_symbol]))
+                    self.g.append(new_production)
+            self.g.update()
+            if not change:
+                break
+        # self.g.print()
+
+    def __build_table (self):
+        self.tab = LLTable()
+        tab: LLTable = self.tab
+        for production in self.g.production:
+            head : Symbol = production.head
+            body : Vector = production.body
+            if not body:
+                for col in self.ga.FOLLOW[head.name]:
+                    tab.add(head, col, production)
+            else:
+                for col in self.ga.vector_first_set(body):
+                    tab.add(head, col, production)
+        # from pprint import pprint
+        # pprint(tab.rows)
+        self.tab.print()
+        return 0
+
+    def build_LL1_table (self) -> LLTable:
+        self.__build_table()
+        return self.tab
+
 
 #----------------------------------------------------------------------
 # conflict solver
@@ -4718,4 +4921,39 @@ if __name__ == '__main__':
                                         algorithm = 'lalr')
         print(parser("max(min(1, 2), max(1, 2))"))
         return 0
+    def test6():
+        grammar_definition = r'''
+        E:  T E' ;
+        E': '+' T E' | ;
+        T:  F T' ;
+        T': '*' F T' | ;
+        F:  '(' E ')' | number ;
+        % token number
+        @ignore [ \t\n\n]*
+        @match number \d+
+        '''
+
+        grammar_definition = r'''
+        T:  A F B number | A F B "(" | A F F |;
+        F:  number ;
+        A:  number ;
+        B:  number ;
+        % token number
+        @ignore [ \t\n\n]*
+        @match number \d+
+        '''
+
+        grammar_definition = r'''
+        Q:  R 'b' | 'b' ;
+        R:  S 'a' | 'a' ;
+        S:  Q 'c' | 'c' ;
+        '''
+        # g = load_from_file('grammar/func.ebnf')
+        g = load_from_string(grammar_definition)
+        g.print()
+        print()
+
+        la = LL1Analyzer(g)
+        la.process()
     test5()
+    test6()
