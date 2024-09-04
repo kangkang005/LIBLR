@@ -3153,7 +3153,7 @@ class LR1Analyzer (object):
         hr = self.__build_states()
         if hr != 0:
             return 3
-        hr = self.__build_table()
+        hr = self.build_table()
         if hr != 0:
             return 4
         return 0
@@ -3458,6 +3458,9 @@ class LR1Analyzer (object):
     def build_LR1_table (self) -> LRTable:
         self.__build_table()
         return self.tab
+
+    def build_table (self) -> LRTable:
+        return self.__build_table()
 
 
 #----------------------------------------------------------------------
@@ -4246,6 +4249,128 @@ class LL1Analyzer (object):
         self.__build_table()
         return self.tab
 
+#----------------------------------------------------------------------
+# LR0 Analyzer
+#----------------------------------------------------------------------
+class LR0Analyzer (LR1Analyzer):
+
+    def closure (self, cc:LRItemSet) -> LRItemSet:
+        cc.clear()
+        for n in cc.kernel:
+            if n.name not in cc:
+                cc.append(n)
+        if 1:
+            LOG_DEBUG('')
+            LOG_DEBUG('-' * 72)
+            LOG_DEBUG('CLOSURE init')
+        top = 0
+        while 1:
+            changes = 0
+            limit = len(cc.closure)
+            while top < limit:
+                A: RulePtr = cc.closure[top]
+                top += 1
+                B: Symbol = A.next
+                if B is None:
+                    continue
+                if B.term:
+                    continue
+                if B.name not in self.g.rule:
+                    LOG_ERROR('no production rules for symbol %s'%B.name)
+                    raise GrammarError('no production rules for symbol %s'%B.name)
+                if 1:
+                    LOG_DEBUG('CLOSURE iteration')
+                    LOG_DEBUG(f'A={A} B={B}')
+                for rule in self.g.rule[B.name]:
+                    rp = RulePtr(rule, 0)
+                    if rp.name not in cc:
+                        cc.append(rp)
+                        changes += 1
+            if changes == 0:
+                break
+        return cc
+
+    def build_table (self):
+        heading = [n for n in self.g.symbol.values()]
+        self.tab = LRTable(heading)
+        tab: LRTable = self.tab
+        # tab.mode = 1
+        if 0:
+            import pprint
+            pprint.pprint(self.link)
+        for state in self.state.values():
+            uuid = state.uuid
+            link = self.link.get(uuid, None)
+            LOG_VERBOSE(f'build table for I{state.uuid}')
+            # LOG_VERBOSE(
+            for rp in state.closure:
+                rp: RulePtr = rp
+                if rp.satisfied:
+                    LOG_VERBOSE("  satisfied:", rp)
+                    if rp.rule.head.name == 'S^':
+                        if len(rp.rule.body) == 1:
+                            action = Action(ActionName.ACCEPT, 0)
+                            action.rule = rp.rule
+                            tab.add(uuid, EOF.name, action)
+                        else:
+                            LOG_ERROR('error accept:', rp)
+                    else:
+                        action = Action(ActionName.REDUCE, rp.rule.index)
+                        action.rule = rp.rule
+                        # all terminals
+                        for terminal_name in self.g.terminal.keys():
+                            tab.add(uuid, terminal_name, action)
+                        tab.add(uuid, EOF.name, action)
+                elif rp.next.name in link:
+                    target = link[rp.next.name]
+                    action = Action(ActionName.SHIFT, target, rp.rule)
+                    tab.add(uuid, rp.next.name, action)
+                else:
+                    LOG_ERROR('error link')
+        return 0
+
+#----------------------------------------------------------------------
+# SLR Analyzer
+#----------------------------------------------------------------------
+class SLRAnalyzer (LR0Analyzer):
+
+    def build_table (self):
+        heading = [n for n in self.g.symbol.values()]
+        self.tab = LRTable(heading)
+        tab: LRTable = self.tab
+        # tab.mode = 1
+        if 0:
+            import pprint
+            pprint.pprint(self.link)
+        for state in self.state.values():
+            uuid = state.uuid
+            link = self.link.get(uuid, None)
+            LOG_VERBOSE(f'build table for I{state.uuid}')
+            # LOG_VERBOSE(
+            for rp in state.closure:
+                rp: RulePtr = rp
+                if rp.satisfied:
+                    LOG_VERBOSE("  satisfied:", rp)
+                    if rp.rule.head.name == 'S^':
+                        if len(rp.rule.body) == 1:
+                            action = Action(ActionName.ACCEPT, 0)
+                            action.rule = rp.rule
+                            tab.add(uuid, "$", action)
+                        else:
+                            LOG_ERROR('error accept:', rp)
+                    else:
+                        action = Action(ActionName.REDUCE, rp.rule.index)
+                        action.rule = rp.rule
+                        # follow(head.name)
+                        for symbol_name in self.ga.FOLLOW[rp.rule.head.name]:
+                            tab.add(uuid, symbol_name, action)
+                elif rp.next.name in link:
+                    target = link[rp.next.name]
+                    action = Action(ActionName.SHIFT, target, rp.rule)
+                    tab.add(uuid, rp.next.name, action)
+                else:
+                    LOG_ERROR('error link')
+        return 0
 
 #----------------------------------------------------------------------
 # conflict solver
@@ -4891,10 +5016,18 @@ def __create_with_grammar(g:Grammar, semantic_action,
         algorithm = 'lr1'
     elif algorithm.lower() in ('lalr', 'lalr1', 'lalr(1)'):
         algorithm = 'lalr'
+    elif algorithm.lower() in ('lr0', 'lr(0)'):
+        algorithm = 'lr0'
+    elif algorithm.lower() in ('slr', 'slr1', 'slr(1)'):
+        algorithm = 'slr'
     else:
         algorithm = 'lr1'
     if algorithm == 'lr1':
         analyzer = LR1Analyzer(g)
+    elif algorithm == 'lr0':
+        analyzer = LR0Analyzer(g)
+    elif algorithm == 'slr':
+        analyzer = SLRAnalyzer(g)
     else:
         analyzer = LALRAnalyzer(g)
     hr = analyzer.process()
@@ -5052,5 +5185,72 @@ if __name__ == '__main__':
 
         la = LL1Analyzer(g)
         la.process()
-    test5()
-    test6()
+
+    def test7():
+        grammar_definition = r'''
+        E: E '+' T | T;
+        T: T '*' F | F;
+        F: number | '(' E ')';
+        %token number
+        @ignore [ \t\n\n]*
+        @match number \d+
+        '''
+
+        g = load_from_string(grammar_definition)
+        g.print()
+        print()
+
+        slr = SLRAnalyzer(g)
+        slr.process()
+        slr.tab.print()
+
+    def test8():
+        grammar_definition = r'''
+        S: L '=' R | R;
+        L: '*' R | number;
+        R: L;
+        %token number
+        @ignore [ \t\n\n]*
+        @match number \d+
+        '''
+
+        g = load_from_string(grammar_definition)
+        g.print()
+        print()
+
+        slr = SLRAnalyzer(g)
+        slr.process()
+        slr.tab.print()
+
+    def test9():
+        grammar_definition = r'''
+        E: E '+' T | T;
+        T: T '*' F | F;
+        F: number | '(' E ')';
+        %token number
+        @ignore [ \t\n\n]*
+        @match number \d+
+        '''
+
+        g = load_from_string(grammar_definition)
+        g.print()
+        print()
+
+        lr = LR0Analyzer(g)
+        lr.process()
+        lr.tab.print()
+
+    def test10():
+        grammar_definition = r'''
+        E: E '+' T | T;
+        T: T '*' F | F;
+        F: number | '(' E ')';
+        %token number
+        @ignore [ \t\n\n]*
+        @match number \d+
+        '''
+        parser = create_parser(grammar_definition,
+                               algorithm = 'slr')
+        print(parser('1+2*3'))
+
+    test8()
