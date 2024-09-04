@@ -337,6 +337,7 @@ class Production (object):
         self.precedence = None
         # 语义动作
         self.action: dict[int, tuple[str, int]] = None  # {token pos: (token value, token pos)}
+        # such as: {1: [('{get}', 1)]}
 
     def __len__ (self):
         return len(self.body)
@@ -1387,7 +1388,7 @@ class cstring (object):
         return text
 
     @staticmethod
-    def tabulify (rows, style = 0):
+    def tabulify (rows, style = 0, align = "left"):
         colsize = {}
         maxcol = 0
         output = []
@@ -1405,6 +1406,7 @@ class cstring (object):
         if maxcol <= 0:
             return ''
         def gettext(row, col):
+            # cell 的长度为 2 + cszie, 左右边距为 1
             csize = colsize[col]
             if row >= len(rows):
                 return ' ' * (csize + 2)
@@ -1412,9 +1414,16 @@ class cstring (object):
             if col >= len(row):
                 return ' ' * (csize + 2)
             text = str(row[col])
-            padding = 2 + csize - len(text)
+            padding = (2 + csize) - len(text)
+            # align default to left
             pad1 = 1
             pad2 = padding - pad1
+            if align == "right":
+                pad2 = 1
+                pad1 = padding - pad2
+            elif align == "center":
+                pad1 = int(padding / 2) # padding 至少为 2
+                pad2 = padding - pad1
             return (' ' * pad1) + text + (' ' * pad2)
         if style == 0:
             for y, row in enumerate(rows):
@@ -1422,6 +1431,7 @@ class cstring (object):
                 output.append(line)
         elif style == 1:
             if rows:
+                # 在第一行数组后面插入标题分隔符
                 newrows = rows[:1]
                 head = [ '-' * colsize[i] for i in range(maxcol) ]
                 newrows.append(head)
@@ -1656,7 +1666,7 @@ class GrammarLoader (object):
         cache = []
         # 产生式右边
         for arg in argv[2:]:
-            if arg.name == 'BAR':
+            if arg.name == 'BAR':   # 产生式或符号 |
                 # hr 返回异常值
                 hr = self._add_rule(head, cache)
                 cache.clear()
@@ -1953,6 +1963,7 @@ class GrammarAnalyzer (object):
         self.epsilon = Symbol('')
         self.FIRST = {}
         self.FOLLOW = {}
+        self.SELECT = {}
         self.terminal = {}
         self.nonterminal = {}
         self.verbose = 2
@@ -1966,6 +1977,7 @@ class GrammarAnalyzer (object):
         self.__update_epsilon()
         self.__update_first_set()
         self.__update_follow_set()
+        self.__update_select_set()
         self.__check_integrity()
         return 0
 
@@ -2137,6 +2149,27 @@ class GrammarAnalyzer (object):
             if not changes:
                 break
         return 0
+
+    def __update_select_set (self):
+        for i, p in enumerate(self.g):
+            first = self.vector_first_set(p.body)
+            if not '' in first:
+                self.SELECT[i] = first
+            else:
+                self.SELECT[i] = (first - set([''])) | self.FOLLOW[p.head]
+
+    def is_LL1 (self):
+        for rule in self.g.rule.values():
+            if len(rule) <= 1:
+                continue
+            select = []
+            for p in rule:
+                select.append((p.index, self.SELECT[p.index]))
+            for i in range(len(select)):
+                for j in range(i):
+                    if select[i][1] & select[j][1]:
+                        return False
+        return True
 
     def __update_epsilon (self):
         g = self.g
@@ -2393,6 +2426,7 @@ class GrammarAnalyzer (object):
 
     def find_undefined_symbol (self):
         undefined = set([])
+        # sname: symbol name
         for sname in self.g.symbol:
             if sname in self.g.terminal:
                 continue
@@ -2404,6 +2438,15 @@ class GrammarAnalyzer (object):
                     undefined.add(sname)
         return list(undefined)
 
+    # symbol can deduce production which only include terminals
+    '''
+    为什么要多次查找 ?
+    例如文法:
+        list: elem;
+        elem: ID;
+    第一趟只找到 elem;      terminated = [elem]
+    第二趟才能找到 list;    terminated = [elem, list]
+    '''
     def find_terminated_symbol (self):
         terminated = set([])
         for symbol in self.g.symbol.values():
@@ -2417,7 +2460,7 @@ class GrammarAnalyzer (object):
                 elif symbol.name not in self.g.rule:
                     continue
                 for rule in self.g.rule[symbol.name]:
-                    can_terminate = True
+                    can_terminate = True    # 产生式右边的符号都能推导出终结符
                     for n in rule.body:
                         if n.name not in terminated:
                             can_terminate = False
@@ -2464,6 +2507,47 @@ class GrammarAnalyzer (object):
         return self.error
 
     # 将 L 型 SDT （即生成式里有语法动作的）转换为 S 型纯后缀的模式
+    '''
+    后缀SDT：所有动作都在产生式最右端的SDT
+
+    1. S 属性的 SDD 翻译成 SDT 比较简单，所有产生的动作位于产生式的右端，也称后缀 SDT。
+       因为 S 属性只包括综合属性，依赖于子结点，因此需要在所有的子结点全部分析处理完毕之后处理。
+
+    2. L 属性的 SDD 翻译成 SDT 的规则如下：
+        (1) 将计算某个非终结符号 A 的继承属性的动作插入到产生式右部中紧靠在 A 的本次出现之前的位置上；
+        (2) 将计算一个产生式左部符号的综合属性的动作放在这个产生式右部的最右端
+
+    如果 S-SDD 的基本文法可以使用 LR 分析技术，那么 SDT 可以在 LR 语法分析过程中实现。
+
+    S-SDD                                           S-SDT
+    Production          Action
+    (1) L -> En         L.val = E.val               L -> En {L.val = E.val}
+    (2) E -> E1 + T     E.val = E1.val + T.val      E -> E1 + T {E.val = E1.val + T.val}
+    (3) E -> T          E.val = T.val               E -> T {E.val = T.val}
+    (4) T -> T1 + F     T.val = T1.val x F.val      T -> T1 + F {T.val = T1.val x F.val}
+    (5) T -> F          T.val = F.val               T -> F {T.val = F.val}
+    (6) F -> ( E )      F.val = E.val               F -> ( E ) {F.val = E.val}
+    (7) F -> digit      F.val = digit.lexval        F -> digit {F.val = digit.lexval}
+
+    L-SDT 转 S-SDT:
+    1. 将给定的基础文法为 LL 文法的 L 属性的 SDD 转换成 SDT，这样的 SDT 在每个非终结符号之前放置语义动作计算它的继承属性，并且在产生式最右端放置一个语义动作计算综合属性；
+    2. 对每个内嵌的语义动作，向这个文法中引入一个标记非终结符号来替换它。每个这样的位置都有一个不同的标记，并且对于任意一个标记 M 都有一个产生式 M→ε；
+    3. 如果标记非终结符号 M 在某个产生式 A→α{a}β 中替换了语义动作 a，对 a 进行修改得到 a’，并且将 a’关联到 M→ε 上。这个动作 a’将动作 a 需要的 A 或 α 中符号的任何属性作为 M 的继承属性进行拷贝，并且按照 a 中的方法计算各个属性，计算得到的属性将作为 M 的综合属性。
+
+    L-SDT
+    1) T  -> F {T'.inh = F.val} T' {T.val = T'.val}
+    2) T' -> * F {T1'.inh = T1'.inh x F.val} T1' {T'.syn = T1'.syn}
+    3) T' -> ε {T'.syn = T'.inh}
+    4) F  -> digit {F.val = digit.lexval}
+
+    S-SDT
+    1) T  -> F M1 T' {T.val = T'.val}
+       M1 -> ε {M1.i = F.val; M1.syn = M1.i}
+    2) T' -> * F M2 T1' {T'.syn = T1'.syn}
+       M2 -> ε {M2.i1 = T'.inh; M2.i2 = F.val; M2.syn = M2.i1 x M2.i2}
+    3) T' -> ε {T'.syn = T'.inh}
+    4) F  -> digit {F.val = digit.lexval}
+    '''
     def __argument_semantic_action (self):
         rules = []
         anchors = []
@@ -2471,6 +2555,7 @@ class GrammarAnalyzer (object):
         for rule in self.g.production:
             rule:Production = rule
             anchor = self.g.anchor_get(rule)
+            # 有语义动作的产生式不放入 rules, 因为需要对当前含语义动作的产生式进行处理
             if not rule.action:
                 rules.append(rule)
                 anchors.append(anchor)
@@ -2483,27 +2568,36 @@ class GrammarAnalyzer (object):
                 rules.append(rule)
                 anchors.append(anchor)
                 continue
-            body = []
-            children = []
+            # 处理内嵌语义动作
+            body = []   # 当前产生式的右边，内嵌语义动作用标记 Mi 取代
+            children = []   # 所有内嵌语义动作的标记 M 产生式
+            # T -> F {T'.inh = F.val} T' {T.val = T'.val}
             for pos, symbol in enumerate(rule.body):
                 if pos in rule.action:
                     head = Symbol('M@%d'%name_id, False)
                     name_id += 1
-                    child = Production(head, [])
+                    # M1 -> ε {M1.i = F.val; M1.syn = M1.i}
+                    child = Production(head, [])    # M → ε
                     child.action = {}
                     child.action[0] = []
-                    stack_pos = len(body)
+                    stack_pos = len(body)       # 记录非终结符 M 在产生式右边的位置
+                    # T -> F {T'.inh = F.val} T' {T.val = T'.val}
+                    #              ^                    ^
+                    # stack_pos:   1                    3
+                    # 产生式 M 在规约时, 计算 M 所在产生式右边的左侧属性
                     for act in rule.action[pos]:
                         child.action[0].append((act[0], stack_pos))
-                    child.parent = len(rules)
+                    child.parent = len(rules)   # 产生式 M 的父类为所含非终结符 M 的产生式
                     children.append(child)
                     body.append(head)
                     self.g.anchor_set(head, anchor[0], anchor[1])
                 body.append(symbol)
+            # T -> F M1 T' {T.val = T'.val}
             root = Production(rule.head, body)
             root.precedence = rule.precedence
             action = {}
             stack_pos = len(body)
+            # 产生式最右边的语法动作
             keys = list(filter(lambda k: k >= len(rule), rule.action.keys()))
             keys.sort()
             # print('keys', keys)
@@ -2515,6 +2609,7 @@ class GrammarAnalyzer (object):
                     action[stack_pos].append((act[0], stack_pos))
             if action:
                 root.action = action
+            # 先将原来的产生式加入到 rules, 再将所有标记符 M 的产生式加入到 rules
             rules.append(root)
             anchors.append(anchor)
             for child in children:
@@ -4890,6 +4985,7 @@ if __name__ == '__main__':
         ga.process()
         ga.print_epsilon()
         ga.print_first()
+        print(ga.is_LL1())
 
         la = LR1Analyzer(g)
         la.process()
@@ -4948,6 +5044,7 @@ if __name__ == '__main__':
         R:  S 'a' | 'a' ;
         S:  Q 'c' | 'c' ;
         '''
+
         # g = load_from_file('grammar/func.ebnf')
         g = load_from_string(grammar_definition)
         g.print()
