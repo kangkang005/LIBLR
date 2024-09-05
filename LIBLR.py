@@ -2950,6 +2950,8 @@ class Action (object):
         if self.name == ActionName.ERROR:
             return 'err'
         name = ActionName(self.name).name[:1]
+        if self.name == ActionName.REDUCE:
+            return name + '/' + str(self.target) + '(%s)'%self.rule
         return name + '/' + str(self.target)
 
     def __repr__ (self):
@@ -4355,7 +4357,7 @@ class SLRAnalyzer (LR0Analyzer):
                         if len(rp.rule.body) == 1:
                             action = Action(ActionName.ACCEPT, 0)
                             action.rule = rp.rule
-                            tab.add(uuid, "$", action)
+                            tab.add(uuid, EOF.name, action)
                         else:
                             LOG_ERROR('error accept:', rp)
                     else:
@@ -4756,6 +4758,7 @@ class PDA (object):
         self.state_stack = []
         self.symbol_stack = []
         self.value_stack = []   # token value
+        self.input_stack = []
         self.current = None
         self._semantic_action = None
         self._lexer_action = None
@@ -4765,6 +4768,8 @@ class PDA (object):
         self.result = None
         self.debug = False
         self.filename = '<buffer>'
+        self.analysis_table = [["Step", "State", "Symbol Stack", "Lookahead", "Input", "Action"]]
+        self.current_action = ""
 
     def install_semantic_action (self, obj):
         self._semantic_action = obj
@@ -4787,6 +4792,7 @@ class PDA (object):
         self.state_stack.clear()
         self.symbol_stack.clear()
         self.value_stack.clear()
+        self.input_stack.clear()
         self.input.open(code)
         self.accepted: bool = False
         self.error = None
@@ -4798,6 +4804,7 @@ class PDA (object):
         return 0
 
     def step (self):
+        self.__append_analysis_table()
         if self.accepted:
             return -1
         elif self.error:
@@ -4833,7 +4840,9 @@ class PDA (object):
             self.state_stack.append(newstate)
             self.symbol_stack.append(symbol)
             self.value_stack.append(lookahead.value)
+            self.input_stack.append(lookahead.value)
             self.current = self.input.read()
+            self.current_action = 'shift/%d'%action.target
             if self.debug:
                 print('action: shift/%d'%action.target)
             retval = 1
@@ -4844,10 +4853,12 @@ class PDA (object):
             assert len(self.state_stack) == 2
             self.accepted = True
             self.result = self.value_stack[-1]
+            self.current_action = 'accept'
             if self.debug:
                 print('action: accept')
         elif action.name == ActionName.ERROR:
             self.error = 'syntax error'
+            self.current_action = 'error'
             if hasattr(action, 'text'):
                 self.error += ': ' + getattr(action, 'text')
             self.error_token(lookahead, self.error)
@@ -4856,6 +4867,7 @@ class PDA (object):
             retval = -7
         if self.debug:
             print()
+        self.__append_analysis_table(-1)
         return retval
 
     # stack: 0 1 2 3 4(top)
@@ -4953,6 +4965,7 @@ class PDA (object):
         self.state_stack.append(newstate)
         self.symbol_stack.append(rule.head)
         self.value_stack.append(value)
+        self.current_action = 'reduce/%d -> %s'%(target, rule)
         if self.debug:
             print('action: reduce/%d -> %s'%(target, rule))
         return 0
@@ -4969,6 +4982,8 @@ class PDA (object):
             if self.debug:
                 self.print()
             self.step()
+        if self.debug:
+            self.print_analysis_table()
         return self.result
 
     def print (self):
@@ -4981,6 +4996,23 @@ class PDA (object):
         print('symbol:', text)
         print('lookahead:', self.current and self.current.name or None)
         return 0
+
+    def __append_analysis_table (self, pos=0):
+        if pos == 0:
+            self.row = []
+            self.analysis_table.append(self.row)
+            self.row.append(len(self.analysis_table)-1)
+            self.row.append(", ".join([str(n) for n in self.state_stack]))
+            self.row.append(", ".join([str(n) for n in self.symbol_stack]))
+            self.row.append(self.current.name)
+            return
+        self.row.append("".join([str(n) for n in self.input_stack]))
+        self.row.append(self.current_action)
+        self.row = None
+
+    def print_analysis_table (self):
+        text = cstring.tabulify(self.analysis_table, 1)
+        print(text)
 
 
 #----------------------------------------------------------------------
@@ -5250,7 +5282,17 @@ if __name__ == '__main__':
         @match number \d+
         '''
         parser = create_parser(grammar_definition,
-                               algorithm = 'slr')
-        print(parser('1+2*3'))
+                               algorithm = 'lalr')
+        print(parser('1*(2+3)', debug=True))
 
-    test8()
+    def test11():
+        grammar_definition = r'''
+        S: L '.' L | L ;
+        L: L B | B ;
+        B: '0' | '1' ;
+        '''
+        parser = create_parser(grammar_definition,
+                               algorithm = 'lr1')
+        print(parser('011.101', debug=True))
+
+    test11()
