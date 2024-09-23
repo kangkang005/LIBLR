@@ -40,7 +40,8 @@ from typing import Generator
 #----------------------------------------------------------------------
 __all__ = ['GrammarError', 'Symbol', 'Vector', 'Production', 'Grammar',
            'Token', 'Parser', 'LRTable', 'Action', 'ActionName', 'Node',
-           'create_parser', 'create_parser_from_file']
+           'create_parser', 'create_parser_from_file', 'load_from_string',
+           'LR1Analyzer', 'GrammarAnalyzer']
 
 
 #----------------------------------------------------------------------
@@ -753,10 +754,13 @@ class Grammar (object):
         return (key in self._anchor)
 
     def print (self, mode = 0, action = False, prec = False):
+        text = ""
         if mode == 0:
             for i, n in enumerate(self.production):
-                t = '(%d) %s'%(i, n.stringify(True, True, action, prec))
+                t = '(%d) %s'%(i+1, n.stringify(True, True, action, prec))
+                text += t+'\n'
                 print(t)
+            return text
         else:
             keys = list(self.rule.keys())
             for key in keys:
@@ -2654,7 +2658,7 @@ class GrammarAnalyzer (object):
         text = cstring.tabulify(rows, 1)
         print(text)
         print()
-        return 0
+        return rows
 
 
 #----------------------------------------------------------------------
@@ -3094,7 +3098,7 @@ class LRTable (object):
             rows.append(body)
         text = cstring.tabulify(rows, 1)
         print(text)
-        return 0
+        return rows
 
 
 #----------------------------------------------------------------------
